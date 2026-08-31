@@ -1,0 +1,6 @@
+{
+  "name": "Jira Board Clone",
+  "description": "Gestor de proyectos ágiles con Kanban board interactivo, sprints, gestión de miembros y roles RBAC, métricas y adjuntos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

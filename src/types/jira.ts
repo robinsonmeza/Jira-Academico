@@ -87,7 +87,8 @@ export interface Task {
   priority: Priority;
   status: string;
   story_points: number | null;
-  assignee_id: number | null;
+  assignee_id: number | null; // Primary assignee (for backwards compatibility)
+  assignee_ids?: number[];    // Multiple assignees
   reporter_id: number | null;
   due_date: string | null;
   position: number;
@@ -96,8 +97,20 @@ export interface Task {
   updated_at: string;
   task_key?: string;
   assignee?: User;
+  assignees?: User[];
   reporter?: User;
   attachments?: TaskAttachment[];
+}
+
+export function getTaskAssigneeIds(task?: Partial<Task> | null): number[] {
+  if (!task) return [];
+  if (Array.isArray(task.assignee_ids) && task.assignee_ids.length > 0) {
+    return task.assignee_ids;
+  }
+  if (task.assignee_id !== null && task.assignee_id !== undefined) {
+    return [task.assignee_id];
+  }
+  return [];
 }
 
 export interface Sprint {
@@ -204,7 +217,10 @@ export function hasPermission(role: Role, permission: Permission): boolean {
   return PERMISSIONS[role]?.[permission] ?? false;
 }
 
-export function canEditTask(role: Role, _task: Task, _userId: number): boolean {
+export function canEditTask(role: Role, task: Task, userId: number): boolean {
   if (hasPermission(role, 'edit_any')) return true;
+  const ids = getTaskAssigneeIds(task);
+  if (ids.includes(userId)) return true;
+  if (task.reporter_id === userId) return true;
   return false;
 }

@@ -13,6 +13,7 @@ import {
   Permission,
   hasPermission,
   canEditTask,
+  getTaskAssigneeIds,
 } from '../types/jira';
 import {
   INITIAL_USERS,
@@ -765,7 +766,15 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUsers((prev) => prev.filter((u) => u.id !== userId));
       setMembers((prev) => prev.filter((m) => m.user_id !== userId));
       setTasks((prev) =>
-        prev.map((t) => (t.assignee_id === userId ? { ...t, assignee_id: null } : t))
+        prev.map((t) => {
+          const currentIds = getTaskAssigneeIds(t);
+          const newIds = currentIds.filter((uid) => uid !== userId);
+          return {
+            ...t,
+            assignee_id: newIds[0] ?? null,
+            assignee_ids: newIds,
+          };
+        })
       );
 
       if (currentUserId === userId) {
@@ -907,6 +916,11 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const nextNum = projectTasks.length + 1;
       const taskKey = `${currentProject.key}-${nextNum}`;
 
+      const assignedIds = data.assignee_ids !== undefined
+        ? data.assignee_ids
+        : (data.assignee_id !== undefined && data.assignee_id !== null ? [data.assignee_id] : []);
+      const primaryAssignee = assignedIds.length > 0 ? assignedIds[0] : (data.assignee_id ?? null);
+
       const newTask: Task = {
         id: Date.now(),
         project_id: currentProject.id,
@@ -918,7 +932,8 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         priority: data.priority || 'medium',
         status: data.status || 'To Do',
         story_points: data.story_points ?? null,
-        assignee_id: data.assignee_id ?? null,
+        assignee_id: primaryAssignee,
+        assignee_ids: assignedIds,
         reporter_id: currentUser.id,
         due_date: data.due_date ?? null,
         position: projectTasks.length,
@@ -947,11 +962,22 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (data.status && data.status !== task.status) {
         logActivity(id, 'moved', 'estado', task.status, data.status);
       }
-      if (data.assignee_id !== undefined && data.assignee_id !== task.assignee_id) {
-        const oldU = users.find((u) => u.id === task.assignee_id)?.name || 'Sin asignar';
-        const newU = users.find((u) => u.id === data.assignee_id)?.name || 'Sin asignar';
-        logActivity(id, 'edited', 'asignado', oldU, newU);
+
+      // Handle assignee updates
+      let updatedAssigneeIds = data.assignee_ids !== undefined
+        ? data.assignee_ids
+        : (data.assignee_id !== undefined ? (data.assignee_id ? [data.assignee_id] : []) : task.assignee_ids ?? (task.assignee_id ? [task.assignee_id] : []));
+      let updatedAssigneeId = updatedAssigneeIds.length > 0 ? updatedAssigneeIds[0] : null;
+
+      if (data.assignee_ids !== undefined || data.assignee_id !== undefined) {
+        const oldIds = getTaskAssigneeIds(task);
+        const oldNames = oldIds.map((uid) => users.find((u) => u.id === uid)?.name || `ID:${uid}`).join(', ') || 'Sin asignar';
+        const newNames = updatedAssigneeIds.map((uid) => users.find((u) => u.id === uid)?.name || `ID:${uid}`).join(', ') || 'Sin asignar';
+        if (oldNames !== newNames) {
+          logActivity(id, 'edited', 'asignados', oldNames, newNames);
+        }
       }
+
       if (data.priority && data.priority !== task.priority) {
         logActivity(id, 'edited', 'prioridad', task.priority, data.priority);
       }
@@ -962,6 +988,8 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
             ? {
                 ...t,
                 ...data,
+                assignee_id: updatedAssigneeId,
+                assignee_ids: updatedAssigneeIds,
                 updated_at: new Date().toISOString(),
               }
             : t

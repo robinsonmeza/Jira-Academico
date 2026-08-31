@@ -1,5 +1,5 @@
 import React from 'react';
-import { Task, TaskType, Priority } from '../types/jira';
+import { Task, TaskType, Priority, getTaskAssigneeIds } from '../types/jira';
 import { useJira } from '../context/JiraContext';
 import {
   Bookmark,
@@ -26,7 +26,8 @@ interface TaskCardProps {
 export const TaskCard: React.FC<TaskCardProps> = ({ task, onOpenModal, onDragStart }) => {
   const { users, comments, attachments } = useJira();
 
-  const assignee = task.assignee_id ? users.find((u) => u.id === task.assignee_id) : null;
+  const assigneeIds = getTaskAssigneeIds(task);
+  const assignedUsers = assigneeIds.map((id) => users.find((u) => u.id === id)).filter(Boolean);
   const taskComments = comments.filter((c) => c.task_id === task.id);
   const taskAttachments = attachments.filter((a) => a.task_id === task.id);
 
@@ -157,14 +158,27 @@ export const TaskCard: React.FC<TaskCardProps> = ({ task, onOpenModal, onDragSta
           )}
         </div>
 
-        {/* Assignee avatar */}
-        {assignee ? (
-          <div
-            className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] text-white font-bold shadow-inner ring-1 ring-slate-200"
-            style={{ backgroundColor: assignee.avatar_color }}
-            title={`Asignado a: ${assignee.name}`}
-          >
-            {assignee.name.charAt(0)}
+        {/* Assignees avatar stack */}
+        {assignedUsers.length > 0 ? (
+          <div className="flex items-center -space-x-1.5 overflow-hidden py-0.5">
+            {assignedUsers.slice(0, 3).map((u) => u && (
+              <div
+                key={u.id}
+                className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] text-white font-bold shadow-2xs ring-2 ring-white"
+                style={{ backgroundColor: u.avatar_color }}
+                title={`Asignado a: ${u.name} (${u.role || (u.is_admin ? 'admin' : 'miembro')})`}
+              >
+                {u.name.charAt(0).toUpperCase()}
+              </div>
+            ))}
+            {assignedUsers.length > 3 && (
+              <div
+                className="w-6 h-6 rounded-full bg-slate-200 border-2 border-white text-slate-700 text-[9px] font-extrabold flex items-center justify-center shadow-2xs"
+                title={assignedUsers.slice(3).map((u) => u?.name).join(', ')}
+              >
+                +{assignedUsers.length - 3}
+              </div>
+            )}
           </div>
         ) : (
           <div

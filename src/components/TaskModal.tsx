@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useJira } from '../context/JiraContext';
-import { Task, TaskType, Priority } from '../types/jira';
+import { Task, TaskType, Priority, getTaskAssigneeIds } from '../types/jira';
 import {
   X,
   Trash2,
@@ -19,6 +19,10 @@ import {
   Eye,
   CheckCircle2,
   Lock,
+  UserPlus,
+  Users,
+  Check,
+  Search,
 } from 'lucide-react';
 
 interface TaskModalProps {
@@ -63,11 +67,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [taskType, setTaskType] = useState<TaskType>('task');
   const [priority, setPriority] = useState<Priority>('medium');
   const [storyPoints, setStoryPoints] = useState<number | ''>('');
-  const [assigneeId, setAssigneeId] = useState<number | ''>('');
+  const [assigneeIds, setAssigneeIds] = useState<number[]>([]);
+  const [isAssigneeDropdownOpen, setIsAssigneeDropdownOpen] = useState(false);
+  const [userSearchQuery, setUserSearchQuery] = useState('');
   const [columnId, setColumnId] = useState<number | ''>('');
   const [sprintId, setSprintId] = useState<number | ''>('');
   const [dueDate, setDueDate] = useState('');
   const [labelsInput, setLabelsInput] = useState('');
+  const assigneeDropdownRef = useRef<HTMLDivElement>(null);
 
   // Active Tab: 'details' | 'comments' | 'activity' | 'attachments'
   const [activeTab, setActiveTab] = useState<'details' | 'comments' | 'activity' | 'attachments'>('details');
@@ -79,6 +86,24 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   // Editable permission check
   const isEditable = !isEditing || (existingTask && canEdit(existingTask));
 
+  // Close assignee dropdown on outside click
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        assigneeDropdownRef.current &&
+        !assigneeDropdownRef.current.contains(event.target as Node)
+      ) {
+        setIsAssigneeDropdownOpen(false);
+      }
+    };
+    if (isAssigneeDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isAssigneeDropdownOpen]);
+
   useEffect(() => {
     if (existingTask) {
       setTitle(existingTask.title);
@@ -86,7 +111,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setTaskType(existingTask.task_type);
       setPriority(existingTask.priority);
       setStoryPoints(existingTask.story_points ?? '');
-      setAssigneeId(existingTask.assignee_id ?? '');
+      setAssigneeIds(getTaskAssigneeIds(existingTask));
       setColumnId(existingTask.column_id ?? '');
       setSprintId(existingTask.sprint_id ?? '');
       setDueDate(existingTask.due_date || '');
@@ -98,18 +123,40 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setTaskType('task');
       setPriority('medium');
       setStoryPoints('');
-      setAssigneeId(currentUser?.id ?? '');
+      setAssigneeIds(currentUser ? [currentUser.id] : []);
       setColumnId(initialColumnId ?? columns[0]?.id ?? '');
       setSprintId('');
       setDueDate('');
       setLabelsInput('');
       setActiveTab('details');
     }
+    setIsAssigneeDropdownOpen(false);
+    setUserSearchQuery('');
     setFormError(null);
     setUploadError(null);
   }, [existingTask, initialColumnId, columns, currentUser, isOpen]);
 
   if (!isOpen) return null;
+
+  const toggleAssignee = (userId: number) => {
+    if (!isEditable) return;
+    setAssigneeIds((prev) =>
+      prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]
+    );
+  };
+
+  const removeAssignee = (userId: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!isEditable) return;
+    setAssigneeIds((prev) => prev.filter((id) => id !== userId));
+  };
+
+  const assignCurrentUser = () => {
+    if (!currentUser || !isEditable) return;
+    if (!assigneeIds.includes(currentUser.id)) {
+      setAssigneeIds((prev) => [...prev, currentUser.id]);
+    }
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -129,7 +176,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       task_type: taskType,
       priority: priority,
       story_points: storyPoints === '' ? null : Number(storyPoints),
-      assignee_id: assigneeId === '' ? null : Number(assigneeId),
+      assignee_id: assigneeIds.length > 0 ? assigneeIds[0] : null,
+      assignee_ids: assigneeIds,
       column_id: columnId === '' ? null : Number(columnId),
       sprint_id: sprintId === '' ? null : Number(sprintId),
       due_date: dueDate || null,
@@ -440,22 +488,185 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                   </select>
                 </div>
 
-                {/* Assignee */}
-                <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Asignado a</label>
-                  <select
-                    value={assigneeId}
-                    onChange={(e) => setAssigneeId(e.target.value === '' ? '' : Number(e.target.value))}
-                    disabled={!isEditable}
-                    className="w-full px-3 py-1.5 border border-slate-300 rounded-xl text-xs bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none disabled:bg-slate-100 shadow-2xs"
+                {/* Assignees (Multiple) */}
+                <div className="relative" ref={assigneeDropdownRef}>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[11px] font-semibold text-slate-600 flex items-center gap-1">
+                      <Users className="w-3 h-3 text-indigo-500" />
+                      <span>Responsables ({assigneeIds.length})</span>
+                    </label>
+                    {currentUser && isEditable && !assigneeIds.includes(currentUser.id) && (
+                      <button
+                        type="button"
+                        onClick={assignCurrentUser}
+                        className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold hover:underline"
+                      >
+                        + Asignarme a mí
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Selected Assignees Chips Container */}
+                  <div
+                    onClick={() => isEditable && setIsAssigneeDropdownOpen((prev) => !prev)}
+                    className={`min-h-[38px] p-1.5 border rounded-xl bg-white flex flex-wrap items-center gap-1.5 transition-all ${
+                      isEditable ? 'cursor-pointer hover:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-500' : 'bg-slate-100 cursor-not-allowed'
+                    } ${isAssigneeDropdownOpen ? 'border-indigo-500 ring-2 ring-indigo-500/20' : 'border-slate-300'} shadow-2xs`}
                   >
-                    <option value="">Sin asignar</option>
-                    {users.map((u) => (
-                      <option key={u.id} value={u.id}>
-                        {u.name}
-                      </option>
-                    ))}
-                  </select>
+                    {assigneeIds.length === 0 ? (
+                      <span className="text-xs text-slate-400 italic px-1.5 py-0.5">
+                        {isEditable ? 'Haz clic para asignar miembros...' : 'Sin asignar'}
+                      </span>
+                    ) : (
+                      assigneeIds.map((uid) => {
+                        const u = users.find((user) => user.id === uid);
+                        if (!u) return null;
+                        return (
+                          <span
+                            key={u.id}
+                            className="inline-flex items-center gap-1 bg-slate-100 text-slate-800 border border-slate-200/80 rounded-lg pl-1 pr-1.5 py-0.5 text-xs font-medium shadow-2xs"
+                          >
+                            <span
+                              className="w-4 h-4 rounded-full flex items-center justify-center text-[9px] text-white font-bold"
+                              style={{ backgroundColor: u.avatar_color }}
+                            >
+                              {u.name.charAt(0).toUpperCase()}
+                            </span>
+                            <span className="truncate max-w-[90px]">{u.name}</span>
+                            {isEditable && (
+                              <button
+                                type="button"
+                                onClick={(e) => removeAssignee(u.id, e)}
+                                className="text-slate-400 hover:text-rose-600 hover:bg-slate-200/60 rounded p-0.5 transition-colors"
+                                title={`Quitar a ${u.name}`}
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            )}
+                          </span>
+                        );
+                      })
+                    )}
+
+                    {isEditable && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setIsAssigneeDropdownOpen((prev) => !prev);
+                        }}
+                        className="ml-auto p-1 text-slate-400 hover:text-indigo-600 rounded-md transition-colors text-xs flex items-center gap-1 font-semibold"
+                        title="Gestionar asignaciones"
+                      >
+                        <UserPlus className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Dropdown Popover */}
+                  {isAssigneeDropdownOpen && isEditable && (
+                    <div className="absolute left-0 right-0 top-full mt-1.5 bg-white border border-slate-200 rounded-xl shadow-xl z-50 p-2 text-xs animate-in fade-in zoom-in-95 duration-100">
+                      {/* Search in user list */}
+                      <div className="relative mb-2">
+                        <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          value={userSearchQuery}
+                          onChange={(e) => setUserSearchQuery(e.target.value)}
+                          placeholder="Buscar usuario o rol..."
+                          className="w-full pl-8 pr-2.5 py-1 bg-slate-50 border border-slate-200 rounded-lg text-xs outline-none focus:bg-white focus:ring-1 focus:ring-indigo-500"
+                          onClick={(e) => e.stopPropagation()}
+                          autoFocus
+                        />
+                      </div>
+
+                      {/* Quick actions */}
+                      <div className="flex items-center justify-between px-1 pb-1.5 mb-1.5 border-b border-slate-100 text-[11px]">
+                        <span className="text-slate-400">Seleccionar responsables</span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setAssigneeIds(users.map((u) => u.id))}
+                            className="text-indigo-600 hover:text-indigo-800 font-semibold"
+                          >
+                            Todos
+                          </button>
+                          <span className="text-slate-300">|</span>
+                          <button
+                            type="button"
+                            onClick={() => setAssigneeIds([])}
+                            className="text-slate-500 hover:text-rose-600 font-semibold"
+                          >
+                            Ninguno
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* User list */}
+                      <div className="max-h-48 overflow-y-auto space-y-0.5">
+                        {users
+                          .filter((u) => {
+                            if (!userSearchQuery.trim()) return true;
+                            const q = userSearchQuery.toLowerCase();
+                            return (
+                              u.name.toLowerCase().includes(q) ||
+                              u.username.toLowerCase().includes(q) ||
+                              (u.role && u.role.toLowerCase().includes(q))
+                            );
+                          })
+                          .map((u) => {
+                            const isAssigned = assigneeIds.includes(u.id);
+                            return (
+                              <button
+                                key={u.id}
+                                type="button"
+                                onClick={() => toggleAssignee(u.id)}
+                                className={`w-full px-2 py-1.5 rounded-lg flex items-center justify-between transition-colors text-left ${
+                                  isAssigned
+                                    ? 'bg-indigo-50/80 text-indigo-900 font-semibold'
+                                    : 'hover:bg-slate-50 text-slate-700'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <div
+                                    className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] text-white font-bold shrink-0"
+                                    style={{ backgroundColor: u.avatar_color }}
+                                  >
+                                    {u.name.charAt(0).toUpperCase()}
+                                  </div>
+                                  <div>
+                                    <div className="text-xs leading-tight">{u.name}</div>
+                                    <div className="text-[10px] text-slate-400 font-mono">
+                                      @{u.username} • {u.role || (u.is_admin ? 'admin' : 'miembro')}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div
+                                  className={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${
+                                    isAssigned
+                                      ? 'bg-indigo-600 border-indigo-600 text-white'
+                                      : 'border-slate-300 bg-white'
+                                  }`}
+                                >
+                                  {isAssigned && <Check className="w-3 h-3 stroke-[3]" />}
+                                </div>
+                              </button>
+                            );
+                          })}
+                      </div>
+
+                      <div className="pt-2 mt-1 border-t border-slate-100 text-right">
+                        <button
+                          type="button"
+                          onClick={() => setIsAssigneeDropdownOpen(false)}
+                          className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold"
+                        >
+                          Listo
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Due Date */}

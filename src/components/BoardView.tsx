@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useJira } from '../context/JiraContext';
-import { Task, BoardColumn } from '../types/jira';
+import { Task, BoardColumn, getTaskAssigneeIds } from '../types/jira';
 import {
   ArrowLeft,
   Kanban,
@@ -113,10 +113,12 @@ export const BoardView: React.FC<BoardViewProps> = ({ onBackToProjects }) => {
 
     // Assignee filter
     if (assigneeFilter) {
+      const taskAssigneeIds = getTaskAssigneeIds(t);
       if (assigneeFilter === 'unassigned') {
-        if (t.assignee_id !== null) return false;
+        if (taskAssigneeIds.length > 0) return false;
       } else {
-        if (String(t.assignee_id) !== assigneeFilter) return false;
+        const filterUserId = Number(assigneeFilter);
+        if (!taskAssigneeIds.includes(filterUserId)) return false;
       }
     }
 

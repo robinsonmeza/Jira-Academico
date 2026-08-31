@@ -1,6 +1,6 @@
 import React from 'react';
 import { useJira } from '../context/JiraContext';
-import { Task, TaskType, Priority } from '../types/jira';
+import { Task, TaskType, Priority, getTaskAssigneeIds } from '../types/jira';
 import {
   ListPlus,
   Bookmark,
@@ -128,7 +128,8 @@ export const BacklogView: React.FC<BacklogViewProps> = ({ onOpenTaskModal, tasks
             </thead>
             <tbody className="divide-y divide-slate-100">
               {backlogTasks.map((task) => {
-                const assignee = task.assignee_id ? users.find((u) => u.id === task.assignee_id) : null;
+                const assigneeIds = getTaskAssigneeIds(task);
+                const assignedUsers = assigneeIds.map((id) => users.find((u) => u.id === id)).filter(Boolean);
                 return (
                   <tr
                     key={task.id}
@@ -173,15 +174,28 @@ export const BacklogView: React.FC<BacklogViewProps> = ({ onOpenTaskModal, tasks
                     </td>
 
                     <td className="px-4 py-3 whitespace-nowrap">
-                      {assignee ? (
+                      {assignedUsers.length > 0 ? (
                         <div className="flex items-center gap-2">
-                          <span
-                            className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-2xs"
-                            style={{ backgroundColor: assignee.avatar_color }}
-                          >
-                            {assignee.name.charAt(0)}
+                          <div className="flex items-center -space-x-1.5 overflow-hidden">
+                            {assignedUsers.slice(0, 3).map((u) => u && (
+                              <span
+                                key={u.id}
+                                className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-2xs ring-1 ring-white"
+                                style={{ backgroundColor: u.avatar_color }}
+                                title={u.name}
+                              >
+                                {u.name.charAt(0).toUpperCase()}
+                              </span>
+                            ))}
+                            {assignedUsers.length > 3 && (
+                              <span className="w-5 h-5 rounded-full bg-slate-200 text-slate-700 text-[9px] font-bold flex items-center justify-center ring-1 ring-white">
+                                +{assignedUsers.length - 3}
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-slate-700 font-medium text-xs max-w-[140px] truncate" title={assignedUsers.map((u) => u?.name).join(', ')}>
+                            {assignedUsers.map((u) => u?.name).join(', ')}
                           </span>
-                          <span className="text-slate-700 font-medium">{assignee.name}</span>
                         </div>
                       ) : (
                         <span className="text-slate-400 italic">Sin asignar</span>

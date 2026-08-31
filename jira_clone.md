@@ -1,6 +1,6 @@
 # Jira Board Clone - Documentación Técnica y Funcional
 
-> **Versión**: 2.5.0  
+> **Versión**: 2.6.0  
 > **Estado**: Producción / Desplegado en Vercel & Firebase Cloud Firestore  
 > **Autor Principal / Project Manager**: Robinson Meza (`RobinsonAmeza@gmail.com`)  
 > **Arquitectura**: React 18 + Vite + TypeScript + Tailwind CSS + Google Cloud Firestore (Firebase)
@@ -13,20 +13,28 @@
 
 ---
 
-## 2. Novedades y Actualizaciones Recientes (v2.5.0)
+## 2. Novedades y Actualizaciones Recientes (v2.6.0)
 
-1. **Persistencia en la Nube con Google Cloud Firestore (Firebase)**:
+1. **Asignación de Múltiples Responsables por Tarea (Multi-Assignee)**:
+   - Soporte para asignar uno o más usuarios a una misma tarea (`assignee_ids: number[]`).
+   - Selector intuitivo con buscador de usuarios por nombre, username y rol, selección rápida ("Asignarme a mí", "Todos", "Ninguno").
+   - Pila de avatares superpuestos en las tarjetas del tablero Kanban y en la vista de Backlog con contador `+N`.
+   - Compatibilidad total hacia atrás con el campo histórico `assignee_id`.
+   - Permisos actualizados: Cualquier usuario asignado a la tarea tiene permiso para editar su contenido y estado.
+   - Registro de auditoría detallado en el historial de actividades de la tarea cuando se modifican los asignados.
+
+2. **Persistencia en la Nube con Google Cloud Firestore (Firebase)**:
    - Sincronización en tiempo real (`onSnapshot`) entre múltiples navegadores, dispositivos y usuarios concurrentes.
    - Guardado continuo de tareas, sprints, proyectos, usuarios, columnas, comentarios y registros de actividad.
    - Soporte offline con respaldo local en `localStorage`.
    - Indicador de estado en vivo en la barra superior (**Cloud Activo** / **Guardando...** / **Offline**).
 
-2. **Acceso Seguro y Flujo de Entrada (Landing / Login)**:
+3. **Acceso Seguro y Flujo de Entrada (Landing / Login)**:
    - Los usuarios aterrizan de forma obligatoria en la pantalla de **Inicio de Sesión**.
    - **Administración Centralizada**: Se descartó el autoregistro público. Solo el Project Manager (Admin) puede crear o importar cuentas de usuario.
    - **Eliminación de Accesos Rápidos de 1 Clic**: Se eliminaron los botones de cambio rápido de usuario que exponían la cuenta del administrador.
 
-3. **Módulo de Administración y Creación de Usuarios**:
+4. **Módulo de Administración y Creación de Usuarios**:
    - Creación individual con credenciales personalizadas, asignación de proyectos y rol.
    - **Importación Masiva vía CSV**: Carga por lotes de estudiantes o desarrolladores asignándoles usuario, contraseña, correo, rol y proyecto inicial.
    - Edición y eliminación de usuarios con protección para evitar borrar al único administrador.

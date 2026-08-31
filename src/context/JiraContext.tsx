@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   User,
   Project,
@@ -24,6 +24,8 @@ import {
   INITIAL_COMMENTS,
   INITIAL_ACTIVITY,
 } from '../data/seedData';
+import { db } from '../lib/firebase';
+import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 
 interface ImportUserPayload {
   name: string;
@@ -50,8 +52,18 @@ interface JiraContextType {
   currentRole: Role;
   hasPerm: (perm: Permission) => boolean;
   canEdit: (task: Task) => boolean;
+  isCloudConnected: boolean;
+  isSyncing: boolean;
   // Auth
   login: (username: string, password?: string) => { success: boolean; error?: string };
+  registerUser: (data: {
+    name: string;
+    username: string;
+    password?: string;
+    email?: string;
+    role: Role;
+    projectId?: number;
+  }) => { success: boolean; error?: string };
   logout: () => void;
   switchUser: (userId: number) => void;
   // Projects
@@ -153,23 +165,124 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [attachments, setAttachments] = useState<TaskAttachment[]>(() => loadFromStorage(STORAGE_KEYS.ATTACHMENTS, []));
 
   const [currentUserId, setCurrentUserId] = useState<number | null>(() =>
-    loadFromStorage(STORAGE_KEYS.CURRENT_USER_ID, 1) // default to Robinson Meza (PM)
+    loadFromStorage(STORAGE_KEYS.CURRENT_USER_ID, null)
   );
 
   const [currentProjectId, setCurrentProjectId] = useState<number | null>(() =>
     loadFromStorage(STORAGE_KEYS.CURRENT_PROJECT_ID, 1)
   );
 
-  // Sync to localStorage
-  useEffect(() => localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users)), [users]);
-  useEffect(() => localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(projects)), [projects]);
-  useEffect(() => localStorage.setItem(STORAGE_KEYS.MEMBERS, JSON.stringify(members)), [members]);
-  useEffect(() => localStorage.setItem(STORAGE_KEYS.COLUMNS, JSON.stringify(columns)), [columns]);
-  useEffect(() => localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(tasks)), [tasks]);
-  useEffect(() => localStorage.setItem(STORAGE_KEYS.SPRINTS, JSON.stringify(sprints)), [sprints]);
-  useEffect(() => localStorage.setItem(STORAGE_KEYS.COMMENTS, JSON.stringify(comments)), [comments]);
-  useEffect(() => localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify(activityLogs)), [activityLogs]);
-  useEffect(() => localStorage.setItem(STORAGE_KEYS.ATTACHMENTS, JSON.stringify(attachments)), [attachments]);
+  const [isCloudConnected, setIsCloudConnected] = useState<boolean>(true);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+
+  const isRemoteUpdate = useRef<boolean>(false);
+  const isInitialized = useRef<boolean>(false);
+
+  // Real-time Firestore Synchronizer (Colaboración Multi-usuario en tiempo real)
+  useEffect(() => {
+    const appDocRef = doc(db, 'app_state', 'main');
+
+    const unsubscribe = onSnapshot(
+      appDocRef,
+      (snapshot) => {
+        setIsCloudConnected(true);
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+          isRemoteUpdate.current = true;
+
+          if (Array.isArray(data.users)) setUsers(data.users);
+          if (Array.isArray(data.projects)) setProjects(data.projects);
+          if (Array.isArray(data.members)) setMembers(data.members);
+          if (Array.isArray(data.columns)) setColumns(data.columns);
+          if (Array.isArray(data.tasks)) setTasks(data.tasks);
+          if (Array.isArray(data.sprints)) setSprints(data.sprints);
+          if (Array.isArray(data.comments)) setComments(data.comments);
+          if (Array.isArray(data.activityLogs)) setActivityLogs(data.activityLogs);
+          if (Array.isArray(data.attachments)) setAttachments(data.attachments);
+
+          setTimeout(() => {
+            isRemoteUpdate.current = false;
+            isInitialized.current = true;
+          }, 100);
+        } else {
+          // Initialize Firebase database with initial state
+          const initialPayload = {
+            id: 'main',
+            users: INITIAL_USERS,
+            projects: INITIAL_PROJECTS,
+            members: INITIAL_MEMBERS,
+            columns: INITIAL_COLUMNS,
+            tasks: INITIAL_TASKS,
+            sprints: INITIAL_SPRINTS,
+            comments: INITIAL_COMMENTS,
+            activityLogs: INITIAL_ACTIVITY,
+            attachments: [],
+            updatedAt: new Date().toISOString(),
+            updatedBy: 'system',
+          };
+          setDoc(appDocRef, initialPayload)
+            .then(() => {
+              isInitialized.current = true;
+            })
+            .catch((err) => {
+              console.error('Error seeding initial Firestore state:', err);
+            });
+        }
+      },
+      (error) => {
+        console.warn('Firestore connection notice:', error.message);
+        setIsCloudConnected(false);
+        isInitialized.current = true;
+      }
+    );
+
+    return () => unsubscribe();
+  }, []);
+
+  // Push local state mutations to Cloud Firestore & LocalStorage
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+    localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(projects));
+    localStorage.setItem(STORAGE_KEYS.MEMBERS, JSON.stringify(members));
+    localStorage.setItem(STORAGE_KEYS.COLUMNS, JSON.stringify(columns));
+    localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(tasks));
+    localStorage.setItem(STORAGE_KEYS.SPRINTS, JSON.stringify(sprints));
+    localStorage.setItem(STORAGE_KEYS.COMMENTS, JSON.stringify(comments));
+    localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify(activityLogs));
+    localStorage.setItem(STORAGE_KEYS.ATTACHMENTS, JSON.stringify(attachments));
+
+    if (isRemoteUpdate.current || !isInitialized.current) {
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        setIsSyncing(true);
+        const appDocRef = doc(db, 'app_state', 'main');
+        await setDoc(appDocRef, {
+          id: 'main',
+          users,
+          projects,
+          members,
+          columns,
+          tasks,
+          sprints,
+          comments,
+          activityLogs,
+          attachments,
+          updatedAt: new Date().toISOString(),
+          updatedBy: currentUserId ? `user_${currentUserId}` : 'unknown',
+        });
+      } catch (err) {
+        console.error('Error saving state to Firestore:', err);
+      } finally {
+        setIsSyncing(false);
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [users, projects, members, columns, tasks, sprints, comments, activityLogs, attachments, currentUserId]);
+
   useEffect(() => {
     if (currentUserId !== null) {
       localStorage.setItem(STORAGE_KEYS.CURRENT_USER_ID, JSON.stringify(currentUserId));
@@ -177,6 +290,7 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       localStorage.removeItem(STORAGE_KEYS.CURRENT_USER_ID);
     }
   }, [currentUserId]);
+
   useEffect(() => {
     if (currentProjectId !== null) {
       localStorage.setItem(STORAGE_KEYS.CURRENT_PROJECT_ID, JSON.stringify(currentProjectId));
@@ -251,17 +365,17 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       return canEditTask(currentRole, task, currentUser.id);
     },
-    [currentRole, currentUser]
+    [currentUser, currentRole]
   );
 
-  // Activity logger helper
+  // Helper: Log activity
   const logActivity = useCallback(
     (
       taskId: number,
       action: ActivityLog['action'],
-      field?: string,
-      oldVal?: string | null,
-      newVal?: string | null
+      fieldChanged?: string,
+      oldVal?: string,
+      newVal?: string
     ) => {
       if (!currentUser) return;
       const newLog: ActivityLog = {
@@ -269,31 +383,96 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         task_id: taskId,
         user_id: currentUser.id,
         action,
-        field_changed: field,
-        old_value: oldVal || undefined,
-        new_value: newVal || undefined,
+        field_changed: fieldChanged,
+        old_value: oldVal,
+        new_value: newVal,
         created_at: new Date().toISOString(),
+        user: currentUser,
       };
       setActivityLogs((prev) => [newLog, ...prev]);
     },
     [currentUser]
   );
 
-  // Authentication
+  // Auth operations
   const login = useCallback(
     (username: string, password?: string) => {
-      const trimmed = username.trim().toLowerCase();
-      const user = users.find((u) => u.username.toLowerCase() === trimmed);
-      if (!user) {
+      const u = users.find(
+        (x) => x.username.toLowerCase() === username.trim().toLowerCase()
+      );
+      if (!u) {
         return { success: false, error: 'Usuario no encontrado' };
       }
-      if (password && user.password && user.password !== password) {
+      if (password && u.password && u.password !== password) {
         return { success: false, error: 'Contraseña incorrecta' };
       }
-      setCurrentUserId(user.id);
+      setCurrentUserId(u.id);
       return { success: true };
     },
     [users]
+  );
+
+  const registerUser = useCallback(
+    (data: {
+      name: string;
+      username: string;
+      password?: string;
+      email?: string;
+      role: Role;
+      projectId?: number;
+    }) => {
+      const trimmedUsername = data.username.trim().toLowerCase();
+      if (!trimmedUsername) {
+        return { success: false, error: 'El nombre de usuario es obligatorio' };
+      }
+      if (!data.name.trim()) {
+        return { success: false, error: 'El nombre completo es obligatorio' };
+      }
+      if (!data.password || data.password.length < 4) {
+        return { success: false, error: 'La contraseña debe tener al menos 4 caracteres' };
+      }
+
+      const existing = users.find((u) => u.username.toLowerCase() === trimmedUsername);
+      if (existing) {
+        return { success: false, error: 'El nombre de usuario ya está registrado' };
+      }
+
+      const colors = ['#4A90D9', '#36B37E', '#FF5630', '#6554C0', '#00B8D9', '#FFAB00', '#EC4899', '#8B5CF6', '#10B981', '#F97316'];
+      const avatarColor = colors[Math.floor(Math.random() * colors.length)];
+      const newUserId = Date.now();
+
+      const newUser: User = {
+        id: newUserId,
+        name: data.name.trim(),
+        username: trimmedUsername,
+        email: data.email?.trim() || `${trimmedUsername}@example.com`,
+        avatar_color: avatarColor,
+        is_admin: data.role === 'admin',
+        role: data.role,
+        password: data.password,
+        created_at: new Date().toISOString(),
+      };
+
+      setUsers((prev) => [...prev, newUser]);
+
+      // If user specified a project or there is at least one accessible project
+      const targetProjectId = data.projectId || (projects[0]?.id);
+      if (targetProjectId) {
+        const newMember: ProjectMember = {
+          id: Date.now() + 1,
+          project_id: targetProjectId,
+          user_id: newUserId,
+          role: data.role,
+          created_at: new Date().toISOString(),
+        };
+        setMembers((prev) => [...prev, newMember]);
+        setCurrentProjectId(targetProjectId);
+      }
+
+      setCurrentUserId(newUserId);
+      return { success: true };
+    },
+    [users, projects]
   );
 
   const logout = useCallback(() => {
@@ -304,223 +483,170 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setCurrentUserId(userId);
   }, []);
 
-  // Projects
+  // Project operations
   const selectProject = useCallback((projectId: number) => {
     setCurrentProjectId(projectId);
   }, []);
 
   const createProject = useCallback(
     (name: string, key: string, description: string) => {
-      if (!currentUser?.is_admin && currentUser?.role !== 'admin' && currentUser?.role !== 'po') {
-        return { success: false, error: 'Solo el Project Manager o Product Owner pueden crear proyectos' };
+      if (!hasPerm('manage_project')) {
+        return { success: false, error: 'No tienes permisos para crear proyectos' };
       }
-      const cleanKey = key.trim().toUpperCase();
-      const cleanName = name.trim();
-      if (!cleanName || !cleanKey) {
-        return { success: false, error: 'Nombre y clave son requeridos' };
+      const trimmedKey = key.trim().toUpperCase();
+      if (!trimmedKey || trimmedKey.length < 2 || trimmedKey.length > 6) {
+        return { success: false, error: 'La clave debe tener entre 2 y 6 caracteres' };
       }
-      if (projects.some((p) => p.key === cleanKey)) {
-        return { success: false, error: `La clave '${cleanKey}' ya existe` };
+      if (projects.some((p) => p.key === trimmedKey)) {
+        return { success: false, error: 'Ya existe un proyecto con esa clave (Key)' };
       }
 
-      const newProjId = Date.now();
+      const newProjectId = Date.now();
       const newProj: Project = {
-        id: newProjId,
-        name: cleanName,
-        key: cleanKey,
+        id: newProjectId,
+        name: name.trim(),
+        key: trimmedKey,
         description: description.trim(),
         created_at: new Date().toISOString(),
       };
 
-      // Default 5 columns
+      // Default columns
       const defaultCols: BoardColumn[] = [
-        { id: newProjId * 10 + 1, project_id: newProjId, name: 'Backlog', position: 0, color: '#DFE1E6', is_done_column: false },
-        { id: newProjId * 10 + 2, project_id: newProjId, name: 'To Do', position: 1, color: '#C3CFE2', is_done_column: false },
-        { id: newProjId * 10 + 3, project_id: newProjId, name: 'In Progress', position: 2, color: '#FFF3CD', is_done_column: false },
-        { id: newProjId * 10 + 4, project_id: newProjId, name: 'In Review', position: 3, color: '#FFE0B2', is_done_column: false },
-        { id: newProjId * 10 + 5, project_id: newProjId, name: 'Done', position: 4, color: '#D4EDDA', is_done_column: true },
+        { id: Date.now() + 1, project_id: newProjectId, name: 'Backlog', position: 0, color: '#DFE1E6', is_done_column: false },
+        { id: Date.now() + 2, project_id: newProjectId, name: 'To Do', position: 1, color: '#C3CFE2', is_done_column: false },
+        { id: Date.now() + 3, project_id: newProjectId, name: 'In Progress', position: 2, color: '#FFF3CD', is_done_column: false },
+        { id: Date.now() + 4, project_id: newProjectId, name: 'In Review', position: 3, color: '#FFE0B2', is_done_column: false },
+        { id: Date.now() + 5, project_id: newProjectId, name: 'Done', position: 4, color: '#D4EDDA', is_done_column: true },
       ];
 
-      // Add creator as member
-      const newMember: ProjectMember = {
-        id: Date.now() + 1,
-        project_id: newProjId,
-        user_id: currentUser.id,
-        role: currentUser.is_admin ? 'admin' : (currentUser.role || 'admin'),
-        created_at: new Date().toISOString(),
-      };
+      // Add creator as member if user exists
+      const newMembers: ProjectMember[] = [];
+      if (currentUser) {
+        newMembers.push({
+          id: Date.now() + 10,
+          project_id: newProjectId,
+          user_id: currentUser.id,
+          role: currentUser.is_admin ? 'admin' : (currentUser.role || 'po'),
+          created_at: new Date().toISOString(),
+        });
+      }
 
-      setProjects((prev) => [newProj, ...prev]);
+      setProjects((prev) => [...prev, newProj]);
       setColumns((prev) => [...prev, ...defaultCols]);
-      setMembers((prev) => [...prev, newMember]);
-      setCurrentProjectId(newProjId);
+      if (newMembers.length > 0) {
+        setMembers((prev) => [...prev, ...newMembers]);
+      }
+      setCurrentProjectId(newProjectId);
 
       return { success: true };
     },
-    [currentUser, projects]
+    [hasPerm, projects, currentUser]
   );
 
   const updateProject = useCallback(
     (id: number, name: string, description: string) => {
-      if (!currentUser?.is_admin && currentUser?.role !== 'admin' && currentUser?.role !== 'po') {
-        return { success: false, error: 'Solo el Project Manager o Product Owner pueden editar proyectos' };
+      if (!hasPerm('manage_project')) {
+        return { success: false, error: 'No tienes permisos para editar proyectos' };
       }
       setProjects((prev) =>
         prev.map((p) => (p.id === id ? { ...p, name: name.trim(), description: description.trim() } : p))
       );
       return { success: true };
     },
-    [currentUser]
+    [hasPerm]
   );
 
   const deleteProject = useCallback(
     (id: number) => {
-      if (!currentUser?.is_admin && currentUser?.role !== 'admin') {
-        return { success: false, error: 'Solo el Project Manager puede eliminar proyectos' };
+      if (!hasPerm('manage_project')) {
+        return { success: false, error: 'No tienes permisos para eliminar proyectos' };
       }
       setProjects((prev) => prev.filter((p) => p.id !== id));
       setColumns((prev) => prev.filter((c) => c.project_id !== id));
       setTasks((prev) => prev.filter((t) => t.project_id !== id));
-      setMembers((prev) => prev.filter((m) => m.project_id !== id));
       setSprints((prev) => prev.filter((s) => s.project_id !== id));
+      setMembers((prev) => prev.filter((m) => m.project_id !== id));
+
       if (currentProjectId === id) {
         const remaining = projects.filter((p) => p.id !== id);
-        setCurrentProjectId(remaining.length > 0 ? remaining[0].id : null);
+        setCurrentProjectId(remaining[0]?.id || null);
       }
       return { success: true };
     },
-    [currentUser, currentProjectId, projects]
+    [hasPerm, currentProjectId, projects]
   );
 
-  // Members Management
+  // Member operations
   const createMemberWithCredentials = useCallback(
-    (data: { name: string; username: string; password?: string; role: Role; project_id: number; email?: string }) => {
-      if (!currentUser?.is_admin && currentUser?.role !== 'admin' && currentUser?.role !== 'po') {
-        return { success: false, error: 'Solo el Project Manager o Product Owner pueden crear nuevos miembros' };
-      }
-      const username = data.username.trim();
-      const name = data.name.trim();
-      if (!name || !username || !data.password) {
-        return { success: false, error: 'Nombre, usuario y contraseña son requeridos' };
-      }
-      if (users.some((u) => u.username.toLowerCase() === username.toLowerCase())) {
-        return { success: false, error: 'El nombre de usuario ya está registrado' };
-      }
-
-      const email =
-        data.email?.trim() || `${username.toLowerCase().replace(/\s+/g, '.')}@institucion.edu`;
-      if (users.some((u) => u.email.toLowerCase() === email.toLowerCase())) {
-        return { success: false, error: 'El correo electrónico ya está en uso' };
+    (data: {
+      name: string;
+      username: string;
+      password?: string;
+      role: Role;
+      project_id: number;
+      email?: string;
+    }) => {
+      if (!hasPerm('manage_members')) {
+        return { success: false, error: 'No tienes permisos para agregar miembros' };
       }
 
-      const colors = ['#4A90D9', '#36B37E', '#FF5630', '#6554C0', '#00B8D9', '#FFAB00', '#EC4899', '#8B5CF6'];
-      const avatarColor = colors[users.length % colors.length];
+      const existingUser = users.find(
+        (u) => u.username.toLowerCase() === data.username.trim().toLowerCase()
+      );
+      let userId: number;
 
-      const newUserId = Date.now();
-      const newUser: User = {
-        id: newUserId,
-        name,
-        username,
-        email,
-        avatar_color: avatarColor,
-        is_admin: data.role === 'admin',
-        role: data.role,
-        password: data.password,
-        created_at: new Date().toISOString(),
-      };
+      if (existingUser) {
+        userId = existingUser.id;
+      } else {
+        userId = Date.now();
+        const colors = ['#4A90D9', '#36B37E', '#FF5630', '#6554C0', '#00B8D9', '#FFAB00', '#EC4899'];
+        const avatarColor = colors[Math.floor(Math.random() * colors.length)];
+        const newUser: User = {
+          id: userId,
+          name: data.name.trim(),
+          username: data.username.trim().toLowerCase(),
+          email: data.email?.trim() || `${data.username.trim().toLowerCase()}@example.com`,
+          avatar_color: avatarColor,
+          is_admin: data.role === 'admin',
+          role: data.role,
+          password: data.password || '123456',
+          created_at: new Date().toISOString(),
+        };
+        setUsers((prev) => [...prev, newUser]);
+      }
+
+      // Check if already member
+      const isAlreadyMember = members.some(
+        (m) => m.project_id === data.project_id && m.user_id === userId
+      );
+      if (isAlreadyMember) {
+        return { success: false, error: 'El usuario ya es miembro de este proyecto' };
+      }
 
       const newMember: ProjectMember = {
         id: Date.now() + 1,
         project_id: data.project_id,
-        user_id: newUserId,
+        user_id: userId,
         role: data.role,
         created_at: new Date().toISOString(),
       };
 
-      setUsers((prev) => [...prev, newUser]);
       setMembers((prev) => [...prev, newMember]);
-
       return { success: true };
     },
-    [currentUser, users]
-  );
-
-  // Batch CSV Import Method - Exclusively for Project Manager (Admin)
-  const importUsersBatch = useCallback(
-    (importedUsers: ImportUserPayload[], defaultProjectId?: number) => {
-      if (!currentUser?.is_admin && currentUser?.role !== 'admin') {
-        return { success: false, count: 0, error: 'Solo desde el rol de Project Manager se puede acceder a la importación CSV' };
-      }
-
-      if (!importedUsers || importedUsers.length === 0) {
-        return { success: false, count: 0, error: 'No se enviaron usuarios para importar' };
-      }
-
-      const colors = ['#4A90D9', '#36B37E', '#FF5630', '#6554C0', '#00B8D9', '#FFAB00', '#EC4899', '#8B5CF6', '#10B981', '#F59E0B'];
-      const baseTime = Date.now();
-
-      const newUsersList: User[] = [];
-      const newMembersList: ProjectMember[] = [];
-      const existingUsernames = new Set(users.map((u) => u.username.toLowerCase()));
-
-      importedUsers.forEach((item, index) => {
-        let cleanUsername = item.username.trim().toLowerCase().replace(/[^a-zA-Z0-9._-]/g, '');
-        if (!cleanUsername) {
-          cleanUsername = item.name.toLowerCase().replace(/\s+/g, '_').replace(/[^a-zA-Z0-9._-]/g, '');
-        }
-
-        // Avoid collision if already used
-        if (existingUsernames.has(cleanUsername)) {
-          cleanUsername = `${cleanUsername}_${index + 1}`;
-        }
-        existingUsernames.add(cleanUsername);
-
-        const newId = baseTime + index;
-        const color = colors[(users.length + index) % colors.length];
-
-        const newUser: User = {
-          id: newId,
-          name: item.name.trim(),
-          username: cleanUsername,
-          email: item.email?.trim() || `${cleanUsername}@institucion.edu`,
-          avatar_color: color,
-          is_admin: item.role === 'admin',
-          role: item.role,
-          password: item.password?.trim() || 'Clave123.',
-          created_at: new Date().toISOString(),
-        };
-
-        newUsersList.push(newUser);
-
-        // Assign to project
-        const targetProjId = item.projectId || defaultProjectId || projects[0]?.id;
-        if (targetProjId) {
-          newMembersList.push({
-            id: baseTime + 10000 + index,
-            project_id: targetProjId,
-            user_id: newId,
-            role: item.role,
-            created_at: new Date().toISOString(),
-          });
-        }
-      });
-
-      setUsers((prev) => [...prev, ...newUsersList]);
-      setMembers((prev) => [...prev, ...newMembersList]);
-
-      return { success: true, count: newUsersList.length };
-    },
-    [currentUser, users, projects]
+    [hasPerm, users, members]
   );
 
   const addMemberToProject = useCallback(
     (projectId: number, userId: number, role: Role) => {
       if (!hasPerm('manage_members')) {
-        return { success: false, error: 'No tienes permiso para gestionar miembros' };
+        return { success: false, error: 'No tienes permisos para agregar miembros' };
       }
-      if (members.some((m) => m.project_id === projectId && m.user_id === userId)) {
+      const isAlready = members.some((m) => m.project_id === projectId && m.user_id === userId);
+      if (isAlready) {
         return { success: false, error: 'El usuario ya es miembro de este proyecto' };
       }
+
       const newMember: ProjectMember = {
         id: Date.now(),
         project_id: projectId,
@@ -550,7 +676,7 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [hasPerm]
   );
 
-  // User Management & Editing - Exclusively for Project Manager (Admin)
+  // User Management (Admin / Project Manager)
   const updateUser = useCallback(
     (
       userId: number,
@@ -564,9 +690,8 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       },
       projectIds?: number[]
     ) => {
-      const isPM = currentUser?.is_admin || currentUser?.role === 'admin';
-      if (!isPM) {
-        return { success: false, error: 'Solo el Project Manager (Admin) tiene permisos para editar usuarios' };
+      if (!currentUser?.is_admin && currentUser?.role !== 'admin') {
+        return { success: false, error: 'Solo el Project Manager (Admin) puede editar usuarios' };
       }
 
       const targetUser = users.find((u) => u.id === userId);
@@ -574,69 +699,51 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: 'Usuario no encontrado' };
       }
 
-      // Check username collision
-      if (data.username) {
-        const cleanUsername = data.username.trim().toLowerCase();
-        if (users.some((u) => u.id !== userId && u.username.toLowerCase() === cleanUsername)) {
-          return { success: false, error: 'El nombre de usuario ya está en uso por otra persona' };
+      if (data.username && data.username.trim().toLowerCase() !== targetUser.username.toLowerCase()) {
+        const isTaken = users.some(
+          (u) => u.id !== userId && u.username.toLowerCase() === data.username?.trim().toLowerCase()
+        );
+        if (isTaken) {
+          return { success: false, error: 'El nombre de usuario ya está en uso' };
         }
       }
-
-      // Check email collision
-      if (data.email) {
-        const cleanEmail = data.email.trim().toLowerCase();
-        if (users.some((u) => u.id !== userId && u.email.toLowerCase() === cleanEmail)) {
-          return { success: false, error: 'El correo electrónico ya está en uso por otra persona' };
-        }
-      }
-
-      const newRole = data.role !== undefined ? data.role : targetUser.role || 'frontend';
-      const isAdmin = newRole === 'admin';
 
       setUsers((prev) =>
         prev.map((u) => {
           if (u.id !== userId) return u;
+          const updatedRole = data.role !== undefined ? data.role : u.role || (u.is_admin ? 'admin' : 'frontend');
+          const updatedIsAdmin = updatedRole === 'admin';
           return {
             ...u,
-            name: data.name !== undefined ? data.name.trim() : u.name,
-            username: data.username !== undefined ? data.username.trim().toLowerCase() : u.username,
+            name: data.name !== undefined ? data.name : u.name,
+            username: data.username !== undefined ? data.username.toLowerCase() : u.username,
             password: data.password !== undefined ? data.password : u.password,
-            email: data.email !== undefined ? data.email.trim() : u.email,
-            role: newRole,
-            is_admin: isAdmin,
+            email: data.email !== undefined ? data.email : u.email,
+            role: updatedRole,
+            is_admin: updatedIsAdmin,
             avatar_color: data.avatar_color !== undefined ? data.avatar_color : u.avatar_color,
           };
         })
       );
 
-      // Synchronize memberships and project assignments
-      setMembers((prev) => {
-        let updated = prev.map((m) => {
-          if (m.user_id !== userId) return m;
-          return { ...m, role: newRole };
+      if (projectIds !== undefined) {
+        const assignedRole: Role = data.role || targetUser.role || (targetUser.is_admin ? 'admin' : 'frontend');
+        setMembers((prev) => {
+          const filtered = prev.filter((m) => m.user_id !== userId);
+          const newEntries: ProjectMember[] = projectIds.map((pId, idx) => ({
+            id: Date.now() + idx + Math.floor(Math.random() * 1000),
+            project_id: pId,
+            user_id: userId,
+            role: assignedRole,
+            created_at: new Date().toISOString(),
+          }));
+          return [...filtered, ...newEntries];
         });
-
-        if (projectIds) {
-          // Remove memberships from projects not in projectIds
-          updated = updated.filter((m) => m.user_id !== userId || projectIds.includes(m.project_id));
-
-          // Add to newly selected projects
-          const currentProjectIds = new Set(updated.filter((m) => m.user_id === userId).map((m) => m.project_id));
-          projectIds.forEach((pId) => {
-            if (!currentProjectIds.has(pId)) {
-              updated.push({
-                id: Date.now() + Math.floor(Math.random() * 10000),
-                project_id: pId,
-                user_id: userId,
-                role: newRole,
-                created_at: new Date().toISOString(),
-              });
-            }
-          });
-        }
-
-        return updated;
-      });
+      } else if (data.role !== undefined) {
+        setMembers((prev) =>
+          prev.map((m) => (m.user_id === userId ? { ...m, role: data.role as Role } : m))
+        );
+      }
 
       return { success: true };
     },
@@ -645,57 +752,128 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const deleteUser = useCallback(
     (userId: number) => {
-      const isPM = currentUser?.is_admin || currentUser?.role === 'admin';
-      if (!isPM) {
-        return { success: false, error: 'Solo el Project Manager (Admin) tiene permisos para eliminar usuarios' };
+      if (!currentUser?.is_admin && currentUser?.role !== 'admin') {
+        return { success: false, error: 'Solo el Project Manager (Admin) puede eliminar usuarios' };
       }
 
       const adminCount = users.filter((u) => u.is_admin || u.role === 'admin').length;
       const targetUser = users.find((u) => u.id === userId);
-      if (targetUser && (targetUser.is_admin || targetUser.role === 'admin') && adminCount <= 1) {
-        return { success: false, error: 'No se puede eliminar el único administrador del sistema' };
-      }
-
-      if (currentUser?.id === userId) {
-        const nextUser = users.find((u) => u.id !== userId);
-        if (nextUser) {
-          setCurrentUserId(nextUser.id);
-        }
+      if ((targetUser?.is_admin || targetUser?.role === 'admin') && adminCount <= 1) {
+        return { success: false, error: 'No es posible eliminar al único Project Manager activo del sistema' };
       }
 
       setUsers((prev) => prev.filter((u) => u.id !== userId));
       setMembers((prev) => prev.filter((m) => m.user_id !== userId));
       setTasks((prev) =>
-        prev.map((t) => ({
-          ...t,
-          assignee_id: t.assignee_id === userId ? null : t.assignee_id,
-        }))
+        prev.map((t) => (t.assignee_id === userId ? { ...t, assignee_id: null } : t))
       );
+
+      if (currentUserId === userId) {
+        const remainingAdmin = users.find((u) => u.id !== userId && (u.is_admin || u.role === 'admin'));
+        if (remainingAdmin) {
+          setCurrentUserId(remainingAdmin.id);
+        } else {
+          const firstRemaining = users.find((u) => u.id !== userId);
+          setCurrentUserId(firstRemaining ? firstRemaining.id : null);
+        }
+      }
 
       return { success: true };
     },
-    [currentUser, users]
+    [currentUser, users, currentUserId]
   );
 
-  // Column management
+  // Batch CSV Import
+  const importUsersBatch = useCallback(
+    (importedUsers: ImportUserPayload[], defaultProjectId?: number) => {
+      if (!hasPerm('import_csv')) {
+        return { success: false, count: 0, error: 'No tienes permisos para importar usuarios por CSV' };
+      }
+
+      if (!importedUsers || importedUsers.length === 0) {
+        return { success: false, count: 0, error: 'La lista de usuarios está vacía' };
+      }
+
+      const colors = ['#4A90D9', '#36B37E', '#FF5630', '#6554C0', '#00B8D9', '#FFAB00', '#EC4899', '#8B5CF6', '#10B981', '#F97316'];
+      const newUsersToAdd: User[] = [];
+      const newMembersToAdd: ProjectMember[] = [];
+
+      let currentMaxId = users.reduce((max, u) => Math.max(max, u.id), 0);
+      let memberMaxId = members.reduce((max, m) => Math.max(max, m.id), 0);
+
+      const existingUsernames = new Map<string, User>();
+      users.forEach((u) => existingUsernames.set(u.username.toLowerCase(), u));
+
+      for (const item of importedUsers) {
+        const normalizedUsername = item.username.trim().toLowerCase();
+        let targetUser = existingUsernames.get(normalizedUsername);
+
+        if (!targetUser) {
+          currentMaxId += 1;
+          const avatarColor = colors[Math.floor(Math.random() * colors.length)];
+          const createdUser: User = {
+            id: currentMaxId,
+            name: item.name.trim(),
+            username: normalizedUsername,
+            email: item.email?.trim() || `${normalizedUsername}@example.com`,
+            avatar_color: avatarColor,
+            is_admin: item.role === 'admin',
+            role: item.role,
+            password: item.password?.trim() || '123456',
+            created_at: new Date().toISOString(),
+          };
+          newUsersToAdd.push(createdUser);
+          existingUsernames.set(normalizedUsername, createdUser);
+          targetUser = createdUser;
+        }
+
+        const projId = item.projectId || defaultProjectId;
+        if (projId && targetUser) {
+          const alreadyMember =
+            members.some((m) => m.project_id === projId && m.user_id === targetUser?.id) ||
+            newMembersToAdd.some((m) => m.project_id === projId && m.user_id === targetUser?.id);
+
+          if (!alreadyMember) {
+            memberMaxId += 1;
+            newMembersToAdd.push({
+              id: memberMaxId,
+              project_id: projId,
+              user_id: targetUser.id,
+              role: item.role,
+              created_at: new Date().toISOString(),
+            });
+          }
+        }
+      }
+
+      if (newUsersToAdd.length > 0) {
+        setUsers((prev) => [...prev, ...newUsersToAdd]);
+      }
+      if (newMembersToAdd.length > 0) {
+        setMembers((prev) => [...prev, ...newMembersToAdd]);
+      }
+
+      return { success: true, count: importedUsers.length };
+    },
+    [hasPerm, users, members]
+  );
+
+  // Column operations
   const addColumn = useCallback(
-    (name: string, color: string = '#DFE1E6', isDone: boolean = false) => {
-      if (!hasPerm('manage_columns') || !currentProjectId) return;
-      const cleanName = name.trim();
-      if (!cleanName) return;
-      const projCols = columns.filter((c) => c.project_id === currentProjectId);
-      const maxPos = projCols.length ? Math.max(...projCols.map((c) => c.position)) : 0;
+    (name: string, color = '#DFE1E6', isDone = false) => {
+      if (!currentProject || !hasPerm('manage_columns')) return;
+      const projectCols = columns.filter((c) => c.project_id === currentProject.id);
       const newCol: BoardColumn = {
         id: Date.now(),
-        project_id: currentProjectId,
-        name: cleanName,
-        position: maxPos + 1,
+        project_id: currentProject.id,
+        name: name.trim(),
+        position: projectCols.length,
         color,
         is_done_column: isDone,
       };
       setColumns((prev) => [...prev, newCol]);
     },
-    [hasPerm, currentProjectId, columns]
+    [currentProject, hasPerm, columns]
   );
 
   const updateColumn = useCallback(
@@ -709,57 +887,41 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const deleteColumn = useCallback(
     (id: number) => {
       if (!hasPerm('manage_columns')) return;
-      const targetCol = columns.find((c) => c.id === id);
-      if (!targetCol) return;
-      const fallback = columns.find((c) => c.project_id === targetCol.project_id && c.id !== id);
-
-      // Reassign tasks to fallback or backlog
-      setTasks((prev) =>
-        prev.map((t) => {
-          if (t.column_id === id) {
-            return {
-              ...t,
-              column_id: fallback ? fallback.id : null,
-              status: fallback ? fallback.name : 'backlog',
-            };
-          }
-          return t;
-        })
-      );
       setColumns((prev) => prev.filter((c) => c.id !== id));
+      setTasks((prev) => prev.map((t) => (t.column_id === id ? { ...t, column_id: null } : t)));
     },
-    [hasPerm, columns]
+    [hasPerm]
   );
 
-  // Tasks Management
+  // Task operations
   const createTask = useCallback(
     (data: Partial<Task>) => {
-      if (!hasPerm('manage_tasks') || !currentProject) {
-        return { success: false, error: 'No tienes permiso para crear tareas' };
+      if (!currentProject || !currentUser) {
+        return { success: false, error: 'No hay proyecto activo' };
       }
-      if (!data.title?.trim()) {
-        return { success: false, error: 'El título es requerido' };
+      if (!hasPerm('manage_tasks')) {
+        return { success: false, error: 'No tienes permisos para crear tareas' };
       }
 
-      const newId = Date.now();
-      const projTasks = tasks.filter((t) => t.project_id === currentProject.id);
-      const taskKey = `${currentProject.key}-${projTasks.length + 1}`;
+      const projectTasks = tasks.filter((t) => t.project_id === currentProject.id);
+      const nextNum = projectTasks.length + 1;
+      const taskKey = `${currentProject.key}-${nextNum}`;
 
       const newTask: Task = {
-        id: newId,
+        id: Date.now(),
         project_id: currentProject.id,
         column_id: data.column_id ?? null,
         sprint_id: data.sprint_id ?? null,
-        title: data.title.trim(),
-        description: data.description?.trim() || '',
+        title: data.title?.trim() || 'Nueva Tarea',
+        description: data.description || '',
         task_type: data.task_type || 'task',
         priority: data.priority || 'medium',
-        status: data.status || 'Backlog',
+        status: data.status || 'To Do',
         story_points: data.story_points ?? null,
         assignee_id: data.assignee_id ?? null,
-        reporter_id: currentUser?.id ?? null,
-        due_date: data.due_date || null,
-        position: projTasks.length,
+        reporter_id: currentUser.id,
+        due_date: data.due_date ?? null,
+        position: projectTasks.length,
         labels: data.labels || [],
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -767,32 +929,32 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
 
       setTasks((prev) => [...prev, newTask]);
-      logActivity(newId, 'created');
-
+      logActivity(newTask.id, 'created');
       return { success: true, task: newTask };
     },
-    [hasPerm, currentProject, tasks, currentUser, logActivity]
+    [currentProject, currentUser, hasPerm, tasks, logActivity]
   );
 
   const updateTask = useCallback(
     (id: number, data: Partial<Task>) => {
-      const existing = tasks.find((t) => t.id === id);
-      if (!existing) return { success: false, error: 'Tarea no encontrada' };
-      if (!canEdit(existing)) {
-        return { success: false, error: 'No tienes permiso para editar esta tarea' };
+      const task = tasks.find((t) => t.id === id);
+      if (!task) return { success: false, error: 'Tarea no encontrada' };
+      if (!canEdit(task)) {
+        return { success: false, error: 'No tienes permisos para editar esta tarea' };
       }
 
       // Log changes
-      Object.keys(data).forEach((key) => {
-        const k = key as keyof Task;
-        if (k !== 'updated_at' && k !== 'attachments' && k !== 'labels') {
-          const oldVal = existing[k];
-          const newVal = data[k];
-          if (oldVal !== undefined && newVal !== undefined && String(oldVal) !== String(newVal)) {
-            logActivity(id, 'edited', k, String(oldVal), String(newVal));
-          }
-        }
-      });
+      if (data.status && data.status !== task.status) {
+        logActivity(id, 'moved', 'estado', task.status, data.status);
+      }
+      if (data.assignee_id !== undefined && data.assignee_id !== task.assignee_id) {
+        const oldU = users.find((u) => u.id === task.assignee_id)?.name || 'Sin asignar';
+        const newU = users.find((u) => u.id === data.assignee_id)?.name || 'Sin asignar';
+        logActivity(id, 'edited', 'asignado', oldU, newU);
+      }
+      if (data.priority && data.priority !== task.priority) {
+        logActivity(id, 'edited', 'prioridad', task.priority, data.priority);
+      }
 
       setTasks((prev) =>
         prev.map((t) =>
@@ -805,74 +967,78 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
             : t
         )
       );
-
       return { success: true };
     },
-    [tasks, canEdit, logActivity]
+    [tasks, canEdit, logActivity, users]
   );
 
   const deleteTask = useCallback(
     (id: number) => {
-      if (!hasPerm('delete_any')) {
-        return { success: false, error: 'No tienes permiso para eliminar tareas' };
+      const task = tasks.find((t) => t.id === id);
+      if (!task) return { success: false, error: 'Tarea no encontrada' };
+      if (!hasPerm('delete_any') && task.reporter_id !== currentUser?.id) {
+        return { success: false, error: 'Solo puedes eliminar tareas que tú creaste o ser Administrador' };
       }
+
       setTasks((prev) => prev.filter((t) => t.id !== id));
       setComments((prev) => prev.filter((c) => c.task_id !== id));
-      setActivityLogs((prev) => prev.filter((a) => a.task_id !== id));
       setAttachments((prev) => prev.filter((a) => a.task_id !== id));
       return { success: true };
     },
-    [hasPerm]
+    [tasks, hasPerm, currentUser]
   );
 
   const moveTask = useCallback(
     (taskId: number, newColumnId: number | null, newPosition?: number) => {
+      const task = tasks.find((t) => t.id === taskId);
+      if (!task) return;
       if (!hasPerm('move_tasks')) return;
-      const target = tasks.find((t) => t.id === taskId);
-      if (!target) return;
 
-      const newCol = newColumnId ? columns.find((c) => c.id === newColumnId) : null;
-      const newStatus = newCol ? newCol.name : 'Backlog';
+      const oldCol = columns.find((c) => c.id === task.column_id);
+      const newCol = columns.find((c) => c.id === newColumnId);
 
-      if (target.column_id !== newColumnId || target.status !== newStatus) {
-        logActivity(taskId, 'moved', 'status', target.status, newStatus);
+      if (oldCol && newCol && oldCol.id !== newCol.id) {
+        logActivity(taskId, 'moved', 'columna', oldCol.name, newCol.name);
       }
 
       setTasks((prev) =>
-        prev.map((t) =>
-          t.id === taskId
-            ? {
-                ...t,
-                column_id: newColumnId,
-                status: newStatus,
-                position: newPosition ?? t.position,
-                updated_at: new Date().toISOString(),
-              }
-            : t
-        )
+        prev.map((t) => {
+          if (t.id !== taskId) return t;
+          return {
+            ...t,
+            column_id: newColumnId,
+            position: newPosition !== undefined ? newPosition : t.position,
+            status: newCol ? newCol.name : t.status,
+            updated_at: new Date().toISOString(),
+          };
+        })
       );
     },
-    [hasPerm, tasks, columns, logActivity]
+    [tasks, hasPerm, columns, logActivity]
   );
 
   // Sprints
   const createSprint = useCallback(
     (name: string, goal: string, startDate?: string, endDate?: string) => {
-      if (!hasPerm('manage_sprints') || !currentProjectId) throw new Error('No autorizado');
+      if (!currentProject || !hasPerm('manage_sprints')) {
+        throw new Error('No autorizado');
+      }
+
       const newSprint: Sprint = {
         id: Date.now(),
-        project_id: currentProjectId,
-        name: name.trim() || `Sprint ${sprints.length + 1}`,
+        project_id: currentProject.id,
+        name: name.trim(),
         goal: goal.trim(),
         start_date: startDate || null,
         end_date: endDate || null,
         status: 'planned',
         created_at: new Date().toISOString(),
       };
-      setSprints((prev) => [newSprint, ...prev]);
+
+      setSprints((prev) => [...prev, newSprint]);
       return newSprint;
     },
-    [hasPerm, currentProjectId, sprints]
+    [currentProject, hasPerm]
   );
 
   const updateSprint = useCallback(
@@ -885,113 +1051,76 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const startSprint = useCallback(
     (sprintId: number) => {
-      if (!hasPerm('manage_sprints') || !currentProjectId) return;
-      const today = new Date().toISOString().split('T')[0];
-
-      // Mark other active sprints in this project as completed
+      if (!hasPerm('manage_sprints')) return;
       setSprints((prev) =>
-        prev.map((s) => {
-          if (s.project_id === currentProjectId) {
-            if (s.id === sprintId) {
-              return { ...s, status: 'active', start_date: s.start_date || today };
-            }
-            if (s.status === 'active') {
-              return { ...s, status: 'completed', end_date: s.end_date || today };
-            }
-          }
-          return s;
-        })
-      );
-
-      // Move backlog tasks to this sprint
-      const firstCol =
-        columns.find((c) => c.project_id === currentProjectId && c.name.toLowerCase().includes('to do')) ||
-        columns.find((c) => c.project_id === currentProjectId && !c.is_done_column);
-
-      setTasks((prev) =>
-        prev.map((t) => {
-          if (t.project_id === currentProjectId && !t.sprint_id) {
-            return {
-              ...t,
-              sprint_id: sprintId,
-              column_id: firstCol ? firstCol.id : t.column_id,
-              status: firstCol ? firstCol.name : t.status,
-            };
-          }
-          return t;
-        })
+        prev.map((s) => (s.id === sprintId ? { ...s, status: 'active' } : s))
       );
     },
-    [hasPerm, currentProjectId, columns]
+    [hasPerm]
   );
 
   const completeSprint = useCallback(
     (sprintId: number) => {
-      if (!hasPerm('manage_sprints') || !currentProjectId) return;
-      const today = new Date().toISOString().split('T')[0];
-
+      if (!hasPerm('manage_sprints')) return;
       setSprints((prev) =>
-        prev.map((s) => (s.id === sprintId ? { ...s, status: 'completed', end_date: s.end_date || today } : s))
-      );
-
-      // Incomplete tasks move back to backlog
-      const doneCol = columns.find((c) => c.project_id === currentProjectId && c.is_done_column);
-      const backlogCol = columns.find((c) => c.project_id === currentProjectId && c.name.toLowerCase() === 'backlog');
-
-      setTasks((prev) =>
-        prev.map((t) => {
-          if (t.sprint_id === sprintId) {
-            const isCompleted = doneCol && t.column_id === doneCol.id;
-            if (!isCompleted) {
-              return {
-                ...t,
-                sprint_id: null,
-                column_id: backlogCol ? backlogCol.id : null,
-                status: backlogCol ? backlogCol.name : 'Backlog',
-              };
-            }
-          }
-          return t;
-        })
+        prev.map((s) => (s.id === sprintId ? { ...s, status: 'completed' } : s))
       );
     },
-    [hasPerm, currentProjectId, columns]
+    [hasPerm]
   );
 
   // Comments
   const addComment = useCallback(
     (taskId: number, content: string) => {
       if (!currentUser || !content.trim()) return;
+
       const newComment: TaskComment = {
         id: Date.now(),
         task_id: taskId,
         user_id: currentUser.id,
         content: content.trim(),
         created_at: new Date().toISOString(),
+        author: currentUser,
       };
-      setComments((prev) => [newComment, ...prev]);
-      logActivity(taskId, 'commented', undefined, undefined, content.trim().slice(0, 100));
+
+      setComments((prev) => [...prev, newComment]);
+      logActivity(taskId, 'commented', 'comentario', undefined, content.substring(0, 30));
     },
     [currentUser, logActivity]
   );
 
-  const deleteComment = useCallback((commentId: number) => {
-    setComments((prev) => prev.filter((c) => c.id !== commentId));
-  }, []);
+  const deleteComment = useCallback(
+    (commentId: number) => {
+      const comm = comments.find((c) => c.id === commentId);
+      if (!comm) return;
+      if (!hasPerm('delete_any') && comm.user_id !== currentUser?.id) return;
+
+      setComments((prev) => prev.filter((c) => c.id !== commentId));
+    },
+    [comments, hasPerm, currentUser]
+  );
 
   // Attachments
   const uploadAttachment = useCallback(
-    async (taskId: number, file: File) => {
-      if (!hasPerm('attach') || !currentUser) {
-        return { success: false, error: 'No tienes permiso para adjuntar archivos' };
+    async (taskId: number, file: File): Promise<{ success: boolean; error?: string }> => {
+      if (!hasPerm('attach')) {
+        return { success: false, error: 'No tienes permisos para adjuntar archivos' };
+      }
+      if (!currentUser) {
+        return { success: false, error: 'Usuario no identificado' };
       }
 
-      return new Promise<{ success: boolean; error?: string }>((resolve) => {
+      // Check max size (5MB for cloud efficiency)
+      if (file.size > 5 * 1024 * 1024) {
+        return { success: false, error: 'El archivo no debe exceder 5MB' };
+      }
+
+      return new Promise((resolve) => {
         const reader = new FileReader();
         reader.onload = () => {
           const dataUrl = reader.result as string;
           const newAttachment: TaskAttachment = {
-            id: Date.now() + Math.floor(Math.random() * 1000),
+            id: Date.now(),
             task_id: taskId,
             filename: file.name,
             stored_name: `${Date.now()}_${file.name}`,
@@ -1028,7 +1157,7 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   // Reset to initial seed
-  const resetToDemoData = useCallback(() => {
+  const resetToDemoData = useCallback(async () => {
     setUsers(INITIAL_USERS);
     setProjects(INITIAL_PROJECTS);
     setMembers(INITIAL_MEMBERS);
@@ -1041,6 +1170,26 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setCurrentUserId(1);
     setCurrentProjectId(1);
     localStorage.clear();
+
+    try {
+      const appDocRef = doc(db, 'app_state', 'main');
+      await setDoc(appDocRef, {
+        id: 'main',
+        users: INITIAL_USERS,
+        projects: INITIAL_PROJECTS,
+        members: INITIAL_MEMBERS,
+        columns: INITIAL_COLUMNS,
+        tasks: INITIAL_TASKS,
+        sprints: INITIAL_SPRINTS,
+        comments: INITIAL_COMMENTS,
+        activityLogs: INITIAL_ACTIVITY,
+        attachments: [],
+        updatedAt: new Date().toISOString(),
+        updatedBy: 'reset',
+      });
+    } catch (err) {
+      console.error('Error resetting Firestore state:', err);
+    }
   }, []);
 
   const value = useMemo(
@@ -1060,7 +1209,10 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       currentRole,
       hasPerm,
       canEdit,
+      isCloudConnected,
+      isSyncing,
       login,
+      registerUser,
       logout,
       switchUser,
       selectProject,
@@ -1107,7 +1259,10 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       currentRole,
       hasPerm,
       canEdit,
+      isCloudConnected,
+      isSyncing,
       login,
+      registerUser,
       logout,
       switchUser,
       selectProject,

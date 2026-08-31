@@ -8,10 +8,10 @@ import {
   LogOut,
   ShieldCheck,
   ChevronDown,
-  RotateCcw,
-  Sparkles,
-  User as UserIcon,
   UserCog,
+  Cloud,
+  CloudOff,
+  RefreshCw,
 } from 'lucide-react';
 import { ManageUsersModal } from './ManageUsersModal';
 
@@ -27,6 +27,8 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, setCurrentView }) =
     projects,
     users,
     currentRole,
+    isCloudConnected,
+    isSyncing,
     selectProject,
     switchUser,
     logout,
@@ -121,6 +123,33 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, setCurrentView }) =
         {/* Right Section: User & Role controls */}
         {currentUser && (
           <div className="flex items-center gap-3">
+            {/* Realtime Cloud Sync Status */}
+            <div
+              className={`hidden md:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all ${
+                isSyncing
+                  ? 'bg-indigo-950/80 text-indigo-300 border-indigo-700/60'
+                  : isCloudConnected
+                  ? 'bg-emerald-950/70 text-emerald-300 border-emerald-800/60'
+                  : 'bg-amber-950/70 text-amber-300 border-amber-800/60'
+              }`}
+              title={
+                isSyncing
+                  ? 'Sincronizando cambios con la nube Firebase...'
+                  : isCloudConnected
+                  ? 'Conectado a Firebase Cloud Firestore (Colaboración en tiempo real activa)'
+                  : 'Modo local activo'
+              }
+            >
+              {isSyncing ? (
+                <RefreshCw className="w-3 h-3 text-indigo-400 animate-spin" />
+              ) : isCloudConnected ? (
+                <Cloud className="w-3 h-3 text-emerald-400" />
+              ) : (
+                <CloudOff className="w-3 h-3 text-amber-400" />
+              )}
+              <span>{isSyncing ? 'Guardando...' : isCloudConnected ? 'Cloud Activo' : 'Offline'}</span>
+            </div>
+
             {/* Project Manager Admin Button */}
             {currentUser.is_admin && (
               <button
@@ -162,84 +191,37 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, setCurrentView }) =
                   className="absolute right-0 mt-2 w-72 bg-slate-900 border border-slate-700/90 rounded-2xl shadow-2xl py-2 z-50 text-slate-200"
                   onMouseLeave={() => setShowUserDropdown(false)}
                 >
-                  <div className="px-4 py-2.5 border-b border-slate-800">
-                    <div className="text-[11px] text-slate-400 font-medium">Sesión activa</div>
-                    <div className="font-bold text-white text-sm">{currentUser.name}</div>
-                    <div className="text-xs text-slate-400">{currentUser.email}</div>
-                  </div>
-
-                  {/* Switch user selector */}
-                  <div className="px-3 py-2">
-                    <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2 px-1 flex items-center justify-between">
-                      <span>Cambiar de usuario</span>
-                      <Sparkles className="w-3 h-3 text-amber-400" />
-                    </div>
-                    <div className="space-y-1">
-                      {users.map((u) => (
-                        <button
-                          key={u.id}
-                          onClick={() => {
-                            switchUser(u.id);
-                            setShowUserDropdown(false);
-                          }}
-                          className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between hover:bg-slate-800 transition-colors ${
-                            u.id === currentUser.id ? 'bg-indigo-600/20 text-indigo-300 font-semibold border border-indigo-500/30' : 'text-slate-300'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2 truncate">
-                            <span
-                              className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] text-white font-bold shrink-0"
-                              style={{ backgroundColor: u.avatar_color }}
-                            >
-                              {u.name.charAt(0)}
-                            </span>
-                            <span className="truncate">{u.name}</span>
-                          </div>
-                          {u.is_admin ? (
-                            <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.5 rounded font-mono shrink-0">
-                              PM
-                            </span>
-                          ) : (
-                            <span className="text-[10px] text-slate-400 font-mono shrink-0">
-                              @{u.username}
-                            </span>
-                          )}
-                        </button>
-                      ))}
+                  <div className="px-4 py-3 border-b border-slate-800">
+                    <div className="text-[10px] text-slate-400 uppercase font-semibold tracking-wider">Sesión activa</div>
+                    <div className="font-bold text-white text-sm mt-0.5">{currentUser.name}</div>
+                    <div className="text-xs text-slate-400 font-mono">@{currentUser.username}</div>
+                    <div className="text-[11px] text-slate-400 truncate mt-0.5">{currentUser.email}</div>
+                    <div className="mt-2">
+                      <span className="inline-flex items-center gap-1 text-[11px] bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded-md font-semibold">
+                        Rol: {ROLE_LABELS[currentRole]}
+                      </span>
                     </div>
                   </div>
 
-                  <div className="border-t border-slate-800 pt-1.5 mt-1 px-1">
+                  <div className="pt-1.5 px-1">
                     {currentUser.is_admin && (
                       <button
                         onClick={() => {
                           setShowManageUsersModal(true);
                           setShowUserDropdown(false);
                         }}
-                        className="w-full text-left px-3 py-2 text-xs text-indigo-300 hover:bg-slate-800/80 rounded-lg flex items-center gap-2 transition-colors font-medium"
+                        className="w-full text-left px-3 py-2 text-xs text-amber-300 hover:bg-slate-800/80 rounded-lg flex items-center gap-2 transition-colors font-medium"
                       >
-                        <UserCog className="w-3.5 h-3.5 text-indigo-400" />
+                        <UserCog className="w-3.5 h-3.5 text-amber-400" />
                         Administrar Usuarios & Permisos
                       </button>
                     )}
                     <button
                       onClick={() => {
-                        if (confirm('¿Restaurar los datos de ejemplo iniciales? Se limpiará el almacenamiento local.')) {
-                          resetToDemoData();
-                          setShowUserDropdown(false);
-                        }
-                      }}
-                      className="w-full text-left px-3 py-2 text-xs text-amber-300 hover:bg-slate-800/80 rounded-lg flex items-center gap-2 transition-colors"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      Restaurar Datos Demo
-                    </button>
-                    <button
-                      onClick={() => {
                         logout();
                         setShowUserDropdown(false);
                       }}
-                      className="w-full text-left px-3 py-2 text-xs text-rose-400 hover:bg-slate-800/80 rounded-lg flex items-center gap-2 transition-colors"
+                      className="w-full text-left px-3 py-2 text-xs text-rose-400 hover:bg-slate-800/80 rounded-lg flex items-center gap-2 transition-colors font-medium"
                     >
                       <LogOut className="w-3.5 h-3.5" />
                       Cerrar Sesión

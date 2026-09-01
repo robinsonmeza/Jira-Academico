@@ -6,6 +6,7 @@ import {
   BoardColumn,
   Task,
   Sprint,
+  SprintStatus,
   TaskComment,
   ActivityLog,
   TaskAttachment,
@@ -176,10 +177,91 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isCloudConnected, setIsCloudConnected] = useState<boolean>(true);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
 
+  // Sync refs to always have the latest state in callbacks & async handlers
+  const usersRef = useRef<User[]>(users);
+  usersRef.current = users;
+  const projectsRef = useRef<Project[]>(projects);
+  projectsRef.current = projects;
+  const membersRef = useRef<ProjectMember[]>(members);
+  membersRef.current = members;
+  const columnsRef = useRef<BoardColumn[]>(columns);
+  columnsRef.current = columns;
+  const tasksRef = useRef<Task[]>(tasks);
+  tasksRef.current = tasks;
+  const sprintsRef = useRef<Sprint[]>(sprints);
+  sprintsRef.current = sprints;
+  const commentsRef = useRef<TaskComment[]>(comments);
+  commentsRef.current = comments;
+  const activityLogsRef = useRef<ActivityLog[]>(activityLogs);
+  activityLogsRef.current = activityLogs;
+  const attachmentsRef = useRef<TaskAttachment[]>(attachments);
+  attachmentsRef.current = attachments;
+
   const isRemoteUpdate = useRef<boolean>(false);
   const isInitialized = useRef<boolean>(false);
 
-  // Real-time Firestore Synchronizer (Colaboración Multi-usuario en tiempo real)
+  // Immediate and robust state persister to LocalStorage & Firestore
+  const persistState = useCallback(
+    async (partial?: {
+      users?: User[];
+      projects?: Project[];
+      members?: ProjectMember[];
+      columns?: BoardColumn[];
+      tasks?: Task[];
+      sprints?: Sprint[];
+      comments?: TaskComment[];
+      activityLogs?: ActivityLog[];
+      attachments?: TaskAttachment[];
+    }) => {
+      const u = partial?.users ?? usersRef.current;
+      const p = partial?.projects ?? projectsRef.current;
+      const m = partial?.members ?? membersRef.current;
+      const col = partial?.columns ?? columnsRef.current;
+      const t = partial?.tasks ?? tasksRef.current;
+      const sp = partial?.sprints ?? sprintsRef.current;
+      const c = partial?.comments ?? commentsRef.current;
+      const a = partial?.activityLogs ?? activityLogsRef.current;
+      const att = partial?.attachments ?? attachmentsRef.current;
+
+      // Update LocalStorage immediately for instant local reliability
+      localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(u));
+      localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(p));
+      localStorage.setItem(STORAGE_KEYS.MEMBERS, JSON.stringify(m));
+      localStorage.setItem(STORAGE_KEYS.COLUMNS, JSON.stringify(col));
+      localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(t));
+      localStorage.setItem(STORAGE_KEYS.SPRINTS, JSON.stringify(sp));
+      localStorage.setItem(STORAGE_KEYS.COMMENTS, JSON.stringify(c));
+      localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify(a));
+      localStorage.setItem(STORAGE_KEYS.ATTACHMENTS, JSON.stringify(att));
+
+      try {
+        setIsSyncing(true);
+        const appDocRef = doc(db, 'app_state', 'main');
+        await setDoc(appDocRef, {
+          id: 'main',
+          users: u,
+          projects: p,
+          members: m,
+          columns: col,
+          tasks: t,
+          sprints: sp,
+          comments: c,
+          activityLogs: a,
+          attachments: att,
+          updatedAt: new Date().toISOString(),
+          updatedBy: currentUserId ? `user_${currentUserId}` : 'system',
+        });
+        setIsCloudConnected(true);
+      } catch (err) {
+        console.error('Error saving state directly to Firestore:', err);
+      } finally {
+        setIsSyncing(false);
+      }
+    },
+    [currentUserId]
+  );
+
+  // Real-time Firestore Synchronizer (Multi-user safe merge)
   useEffect(() => {
     const appDocRef = doc(db, 'app_state', 'main');
 
@@ -191,22 +273,73 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const data = snapshot.data();
           isRemoteUpdate.current = true;
 
-          if (Array.isArray(data.users)) setUsers(data.users);
-          if (Array.isArray(data.projects)) setProjects(data.projects);
-          if (Array.isArray(data.members)) setMembers(data.members);
-          if (Array.isArray(data.columns)) setColumns(data.columns);
-          if (Array.isArray(data.tasks)) setTasks(data.tasks);
-          if (Array.isArray(data.sprints)) setSprints(data.sprints);
-          if (Array.isArray(data.comments)) setComments(data.comments);
-          if (Array.isArray(data.activityLogs)) setActivityLogs(data.activityLogs);
-          if (Array.isArray(data.attachments)) setAttachments(data.attachments);
+          if (Array.isArray(data.users)) {
+            setUsers(data.users);
+            localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(data.users));
+          }
+          if (Array.isArray(data.projects)) {
+            setProjects(data.projects);
+            localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(data.projects));
+          }
+          if (Array.isArray(data.members)) {
+            setMembers(data.members);
+            localStorage.setItem(STORAGE_KEYS.MEMBERS, JSON.stringify(data.members));
+          }
+          if (Array.isArray(data.columns)) {
+            setColumns(data.columns);
+            localStorage.setItem(STORAGE_KEYS.COLUMNS, JSON.stringify(data.columns));
+          }
+
+          // Smart merge tasks: ensure no newly created local task is accidentally wiped by a stale snapshot
+          if (Array.isArray(data.tasks)) {
+            const remoteTasks: Task[] = data.tasks;
+            const localTasks = tasksRef.current;
+
+            // Map remote tasks by id
+            const remoteMap = new Map<number, Task>();
+            remoteTasks.forEach((rt) => remoteMap.set(rt.id, rt));
+
+            // Include local tasks that were created/updated very recently (within 2 minutes) and haven't synced yet
+            const now = Date.now();
+            const mergedTasks = [...remoteTasks];
+
+            localTasks.forEach((lt) => {
+              if (!remoteMap.has(lt.id)) {
+                const taskTime = lt.updated_at ? new Date(lt.updated_at).getTime() : lt.id;
+                // If created in the last 2 minutes, keep it
+                if (now - taskTime < 120000) {
+                  mergedTasks.push(lt);
+                }
+              }
+            });
+
+            setTasks(mergedTasks);
+            localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(mergedTasks));
+          }
+
+          if (Array.isArray(data.sprints)) {
+            setSprints(data.sprints);
+            localStorage.setItem(STORAGE_KEYS.SPRINTS, JSON.stringify(data.sprints));
+          }
+          if (Array.isArray(data.comments)) {
+            setComments(data.comments);
+            localStorage.setItem(STORAGE_KEYS.COMMENTS, JSON.stringify(data.comments));
+          }
+          if (Array.isArray(data.activityLogs)) {
+            setActivityLogs(data.activityLogs);
+            localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify(data.activityLogs));
+          }
+          if (Array.isArray(data.attachments)) {
+            setAttachments(data.attachments);
+            localStorage.setItem(STORAGE_KEYS.ATTACHMENTS, JSON.stringify(data.attachments));
+          }
 
           setTimeout(() => {
             isRemoteUpdate.current = false;
             isInitialized.current = true;
           }, 100);
         } else {
-          // Initialize Firebase database with initial state
+          // Initialize Firebase database with initial state if empty
           const initialPayload = {
             id: 'main',
             users: INITIAL_USERS,
@@ -539,9 +672,14 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       setCurrentProjectId(newProjectId);
 
+      const updatedProjects = [...projectsRef.current, newProj];
+      const updatedCols = [...columnsRef.current, ...defaultCols];
+      const updatedMembers = newMembers.length > 0 ? [...membersRef.current, ...newMembers] : membersRef.current;
+      persistState({ projects: updatedProjects, columns: updatedCols, members: updatedMembers });
+
       return { success: true };
     },
-    [hasPerm, projects, currentUser]
+    [hasPerm, currentUser, persistState]
   );
 
   const updateProject = useCallback(
@@ -549,12 +687,14 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!hasPerm('manage_project')) {
         return { success: false, error: 'No tienes permisos para editar proyectos' };
       }
-      setProjects((prev) =>
-        prev.map((p) => (p.id === id ? { ...p, name: name.trim(), description: description.trim() } : p))
+      const updated = projectsRef.current.map((p) =>
+        p.id === id ? { ...p, name: name.trim(), description: description.trim() } : p
       );
+      setProjects(updated);
+      persistState({ projects: updated });
       return { success: true };
     },
-    [hasPerm]
+    [hasPerm, persistState]
   );
 
   const deleteProject = useCallback(
@@ -562,19 +702,33 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!hasPerm('manage_project')) {
         return { success: false, error: 'No tienes permisos para eliminar proyectos' };
       }
-      setProjects((prev) => prev.filter((p) => p.id !== id));
-      setColumns((prev) => prev.filter((c) => c.project_id !== id));
-      setTasks((prev) => prev.filter((t) => t.project_id !== id));
-      setSprints((prev) => prev.filter((s) => s.project_id !== id));
-      setMembers((prev) => prev.filter((m) => m.project_id !== id));
+      const updatedProj = projectsRef.current.filter((p) => p.id !== id);
+      const updatedCols = columnsRef.current.filter((c) => c.project_id !== id);
+      const updatedTasks = tasksRef.current.filter((t) => t.project_id !== id);
+      const updatedSprints = sprintsRef.current.filter((s) => s.project_id !== id);
+      const updatedMembers = membersRef.current.filter((m) => m.project_id !== id);
+
+      setProjects(updatedProj);
+      setColumns(updatedCols);
+      setTasks(updatedTasks);
+      setSprints(updatedSprints);
+      setMembers(updatedMembers);
 
       if (currentProjectId === id) {
-        const remaining = projects.filter((p) => p.id !== id);
-        setCurrentProjectId(remaining[0]?.id || null);
+        setCurrentProjectId(updatedProj[0]?.id || null);
       }
+
+      persistState({
+        projects: updatedProj,
+        columns: updatedCols,
+        tasks: updatedTasks,
+        sprints: updatedSprints,
+        members: updatedMembers,
+      });
+
       return { success: true };
     },
-    [hasPerm, currentProjectId, projects]
+    [hasPerm, currentProjectId, persistState]
   );
 
   // Member operations
@@ -591,10 +745,11 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: 'No tienes permisos para agregar miembros' };
       }
 
-      const existingUser = users.find(
+      const existingUser = usersRef.current.find(
         (u) => u.username.toLowerCase() === data.username.trim().toLowerCase()
       );
       let userId: number;
+      let updatedUsers = usersRef.current;
 
       if (existingUser) {
         userId = existingUser.id;
@@ -613,11 +768,12 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
           password: data.password || '123456',
           created_at: new Date().toISOString(),
         };
-        setUsers((prev) => [...prev, newUser]);
+        updatedUsers = [...usersRef.current, newUser];
+        setUsers(updatedUsers);
       }
 
       // Check if already member
-      const isAlreadyMember = members.some(
+      const isAlreadyMember = membersRef.current.some(
         (m) => m.project_id === data.project_id && m.user_id === userId
       );
       if (isAlreadyMember) {
@@ -632,10 +788,13 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         created_at: new Date().toISOString(),
       };
 
-      setMembers((prev) => [...prev, newMember]);
+      const updatedMembers = [...membersRef.current, newMember];
+      setMembers(updatedMembers);
+      persistState({ users: updatedUsers, members: updatedMembers });
+
       return { success: true };
     },
-    [hasPerm, users, members]
+    [hasPerm, persistState]
   );
 
   const addMemberToProject = useCallback(
@@ -643,7 +802,7 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!hasPerm('manage_members')) {
         return { success: false, error: 'No tienes permisos para agregar miembros' };
       }
-      const isAlready = members.some((m) => m.project_id === projectId && m.user_id === userId);
+      const isAlready = membersRef.current.some((m) => m.project_id === projectId && m.user_id === userId);
       if (isAlready) {
         return { success: false, error: 'El usuario ya es miembro de este proyecto' };
       }
@@ -655,26 +814,32 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         role,
         created_at: new Date().toISOString(),
       };
-      setMembers((prev) => [...prev, newMember]);
+      const updated = [...membersRef.current, newMember];
+      setMembers(updated);
+      persistState({ members: updated });
       return { success: true };
     },
-    [hasPerm, members]
+    [hasPerm, persistState]
   );
 
   const updateMemberRole = useCallback(
     (memberId: number, role: Role) => {
       if (!hasPerm('manage_members')) return;
-      setMembers((prev) => prev.map((m) => (m.id === memberId ? { ...m, role } : m)));
+      const updated = membersRef.current.map((m) => (m.id === memberId ? { ...m, role } : m));
+      setMembers(updated);
+      persistState({ members: updated });
     },
-    [hasPerm]
+    [hasPerm, persistState]
   );
 
   const removeMemberFromProject = useCallback(
     (memberId: number) => {
       if (!hasPerm('manage_members')) return;
-      setMembers((prev) => prev.filter((m) => m.id !== memberId));
+      const updated = membersRef.current.filter((m) => m.id !== memberId);
+      setMembers(updated);
+      persistState({ members: updated });
     },
-    [hasPerm]
+    [hasPerm, persistState]
   );
 
   // User Management (Admin / Project Manager)
@@ -695,13 +860,13 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: 'Solo el Project Manager (Admin) puede editar usuarios' };
       }
 
-      const targetUser = users.find((u) => u.id === userId);
+      const targetUser = usersRef.current.find((u) => u.id === userId);
       if (!targetUser) {
         return { success: false, error: 'Usuario no encontrado' };
       }
 
       if (data.username && data.username.trim().toLowerCase() !== targetUser.username.toLowerCase()) {
-        const isTaken = users.some(
+        const isTaken = usersRef.current.some(
           (u) => u.id !== userId && u.username.toLowerCase() === data.username?.trim().toLowerCase()
         );
         if (isTaken) {
@@ -709,46 +874,47 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
-      setUsers((prev) =>
-        prev.map((u) => {
-          if (u.id !== userId) return u;
-          const updatedRole = data.role !== undefined ? data.role : u.role || (u.is_admin ? 'admin' : 'frontend');
-          const updatedIsAdmin = updatedRole === 'admin';
-          return {
-            ...u,
-            name: data.name !== undefined ? data.name : u.name,
-            username: data.username !== undefined ? data.username.toLowerCase() : u.username,
-            password: data.password !== undefined ? data.password : u.password,
-            email: data.email !== undefined ? data.email : u.email,
-            role: updatedRole,
-            is_admin: updatedIsAdmin,
-            avatar_color: data.avatar_color !== undefined ? data.avatar_color : u.avatar_color,
-          };
-        })
-      );
+      const updatedUsers = usersRef.current.map((u) => {
+        if (u.id !== userId) return u;
+        const updatedRole = data.role !== undefined ? data.role : u.role || (u.is_admin ? 'admin' : 'frontend');
+        const updatedIsAdmin = updatedRole === 'admin';
+        return {
+          ...u,
+          name: data.name !== undefined ? data.name : u.name,
+          username: data.username !== undefined ? data.username.toLowerCase() : u.username,
+          password: data.password !== undefined ? data.password : u.password,
+          email: data.email !== undefined ? data.email : u.email,
+          role: updatedRole,
+          is_admin: updatedIsAdmin,
+          avatar_color: data.avatar_color !== undefined ? data.avatar_color : u.avatar_color,
+        };
+      });
 
+      let updatedMembers = membersRef.current;
       if (projectIds !== undefined) {
         const assignedRole: Role = data.role || targetUser.role || (targetUser.is_admin ? 'admin' : 'frontend');
-        setMembers((prev) => {
-          const filtered = prev.filter((m) => m.user_id !== userId);
-          const newEntries: ProjectMember[] = projectIds.map((pId, idx) => ({
-            id: Date.now() + idx + Math.floor(Math.random() * 1000),
-            project_id: pId,
-            user_id: userId,
-            role: assignedRole,
-            created_at: new Date().toISOString(),
-          }));
-          return [...filtered, ...newEntries];
-        });
+        const filtered = membersRef.current.filter((m) => m.user_id !== userId);
+        const newEntries: ProjectMember[] = projectIds.map((pId, idx) => ({
+          id: Date.now() + idx + Math.floor(Math.random() * 1000),
+          project_id: pId,
+          user_id: userId,
+          role: assignedRole,
+          created_at: new Date().toISOString(),
+        }));
+        updatedMembers = [...filtered, ...newEntries];
       } else if (data.role !== undefined) {
-        setMembers((prev) =>
-          prev.map((m) => (m.user_id === userId ? { ...m, role: data.role as Role } : m))
+        updatedMembers = membersRef.current.map((m) =>
+          m.user_id === userId ? { ...m, role: data.role as Role } : m
         );
       }
 
+      setUsers(updatedUsers);
+      setMembers(updatedMembers);
+      persistState({ users: updatedUsers, members: updatedMembers });
+
       return { success: true };
     },
-    [currentUser, users]
+    [currentUser, persistState]
   );
 
   const deleteUser = useCallback(
@@ -757,39 +923,42 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: 'Solo el Project Manager (Admin) puede eliminar usuarios' };
       }
 
-      const adminCount = users.filter((u) => u.is_admin || u.role === 'admin').length;
-      const targetUser = users.find((u) => u.id === userId);
+      const adminCount = usersRef.current.filter((u) => u.is_admin || u.role === 'admin').length;
+      const targetUser = usersRef.current.find((u) => u.id === userId);
       if ((targetUser?.is_admin || targetUser?.role === 'admin') && adminCount <= 1) {
         return { success: false, error: 'No es posible eliminar al único Project Manager activo del sistema' };
       }
 
-      setUsers((prev) => prev.filter((u) => u.id !== userId));
-      setMembers((prev) => prev.filter((m) => m.user_id !== userId));
-      setTasks((prev) =>
-        prev.map((t) => {
-          const currentIds = getTaskAssigneeIds(t);
-          const newIds = currentIds.filter((uid) => uid !== userId);
-          return {
-            ...t,
-            assignee_id: newIds[0] ?? null,
-            assignee_ids: newIds,
-          };
-        })
-      );
+      const updatedUsers = usersRef.current.filter((u) => u.id !== userId);
+      const updatedMembers = membersRef.current.filter((m) => m.user_id !== userId);
+      const updatedTasks = tasksRef.current.map((t) => {
+        const currentIds = getTaskAssigneeIds(t);
+        const newIds = currentIds.filter((uid) => uid !== userId);
+        return {
+          ...t,
+          assignee_id: newIds[0] ?? null,
+          assignee_ids: newIds,
+        };
+      });
+
+      setUsers(updatedUsers);
+      setMembers(updatedMembers);
+      setTasks(updatedTasks);
 
       if (currentUserId === userId) {
-        const remainingAdmin = users.find((u) => u.id !== userId && (u.is_admin || u.role === 'admin'));
+        const remainingAdmin = updatedUsers.find((u) => u.is_admin || u.role === 'admin');
         if (remainingAdmin) {
           setCurrentUserId(remainingAdmin.id);
         } else {
-          const firstRemaining = users.find((u) => u.id !== userId);
+          const firstRemaining = updatedUsers[0];
           setCurrentUserId(firstRemaining ? firstRemaining.id : null);
         }
       }
 
+      persistState({ users: updatedUsers, members: updatedMembers, tasks: updatedTasks });
       return { success: true };
     },
-    [currentUser, users, currentUserId]
+    [currentUser, currentUserId, persistState]
   );
 
   // Batch CSV Import
@@ -807,11 +976,11 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const newUsersToAdd: User[] = [];
       const newMembersToAdd: ProjectMember[] = [];
 
-      let currentMaxId = users.reduce((max, u) => Math.max(max, u.id), 0);
-      let memberMaxId = members.reduce((max, m) => Math.max(max, m.id), 0);
+      let currentMaxId = usersRef.current.reduce((max, u) => Math.max(max, u.id), 0);
+      let memberMaxId = membersRef.current.reduce((max, m) => Math.max(max, m.id), 0);
 
       const existingUsernames = new Map<string, User>();
-      users.forEach((u) => existingUsernames.set(u.username.toLowerCase(), u));
+      usersRef.current.forEach((u) => existingUsernames.set(u.username.toLowerCase(), u));
 
       for (const item of importedUsers) {
         const normalizedUsername = item.username.trim().toLowerCase();
@@ -839,7 +1008,7 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const projId = item.projectId || defaultProjectId;
         if (projId && targetUser) {
           const alreadyMember =
-            members.some((m) => m.project_id === projId && m.user_id === targetUser?.id) ||
+            membersRef.current.some((m) => m.project_id === projId && m.user_id === targetUser?.id) ||
             newMembersToAdd.some((m) => m.project_id === projId && m.user_id === targetUser?.id);
 
           if (!alreadyMember) {
@@ -855,23 +1024,23 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
-      if (newUsersToAdd.length > 0) {
-        setUsers((prev) => [...prev, ...newUsersToAdd]);
-      }
-      if (newMembersToAdd.length > 0) {
-        setMembers((prev) => [...prev, ...newMembersToAdd]);
-      }
+      const finalUsers = newUsersToAdd.length > 0 ? [...usersRef.current, ...newUsersToAdd] : usersRef.current;
+      const finalMembers = newMembersToAdd.length > 0 ? [...membersRef.current, ...newMembersToAdd] : membersRef.current;
 
+      if (newUsersToAdd.length > 0) setUsers(finalUsers);
+      if (newMembersToAdd.length > 0) setMembers(finalMembers);
+
+      persistState({ users: finalUsers, members: finalMembers });
       return { success: true, count: importedUsers.length };
     },
-    [hasPerm, users, members]
+    [hasPerm, persistState]
   );
 
   // Column operations
   const addColumn = useCallback(
     (name: string, color = '#DFE1E6', isDone = false) => {
       if (!currentProject || !hasPerm('manage_columns')) return;
-      const projectCols = columns.filter((c) => c.project_id === currentProject.id);
+      const projectCols = columnsRef.current.filter((c) => c.project_id === currentProject.id);
       const newCol: BoardColumn = {
         id: Date.now(),
         project_id: currentProject.id,
@@ -880,26 +1049,33 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         color,
         is_done_column: isDone,
       };
-      setColumns((prev) => [...prev, newCol]);
+      const updated = [...columnsRef.current, newCol];
+      setColumns(updated);
+      persistState({ columns: updated });
     },
-    [currentProject, hasPerm, columns]
+    [currentProject, hasPerm, persistState]
   );
 
   const updateColumn = useCallback(
     (id: number, updates: Partial<BoardColumn>) => {
       if (!hasPerm('manage_columns')) return;
-      setColumns((prev) => prev.map((c) => (c.id === id ? { ...c, ...updates } : c)));
+      const updated = columnsRef.current.map((c) => (c.id === id ? { ...c, ...updates } : c));
+      setColumns(updated);
+      persistState({ columns: updated });
     },
-    [hasPerm]
+    [hasPerm, persistState]
   );
 
   const deleteColumn = useCallback(
     (id: number) => {
       if (!hasPerm('manage_columns')) return;
-      setColumns((prev) => prev.filter((c) => c.id !== id));
-      setTasks((prev) => prev.map((t) => (t.column_id === id ? { ...t, column_id: null } : t)));
+      const updatedCols = columnsRef.current.filter((c) => c.id !== id);
+      const updatedTasks = tasksRef.current.map((t) => (t.column_id === id ? { ...t, column_id: null } : t));
+      setColumns(updatedCols);
+      setTasks(updatedTasks);
+      persistState({ columns: updatedCols, tasks: updatedTasks });
     },
-    [hasPerm]
+    [hasPerm, persistState]
   );
 
   // Task operations
@@ -912,25 +1088,62 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: 'No tienes permisos para crear tareas' };
       }
 
-      const projectTasks = tasks.filter((t) => t.project_id === currentProject.id);
+      const allTasks = tasksRef.current;
+      const projectTasks = allTasks.filter((t) => t.project_id === currentProject.id);
       const nextNum = projectTasks.length + 1;
       const taskKey = `${currentProject.key}-${nextNum}`;
 
-      const assignedIds = data.assignee_ids !== undefined
-        ? data.assignee_ids
-        : (data.assignee_id !== undefined && data.assignee_id !== null ? [data.assignee_id] : []);
-      const primaryAssignee = assignedIds.length > 0 ? assignedIds[0] : (data.assignee_id ?? null);
+      const assignedIds =
+        data.assignee_ids !== undefined
+          ? data.assignee_ids
+          : data.assignee_id !== undefined && data.assignee_id !== null
+          ? [data.assignee_id]
+          : [];
+      const primaryAssignee = assignedIds.length > 0 ? assignedIds[0] : data.assignee_id ?? null;
 
+      // Robust column and status resolution
+      const projectCols = columnsRef.current.filter((c) => c.project_id === currentProject.id);
+      let targetColId: number | null = data.column_id ?? null;
+      let targetStatus: string = data.status || 'To Do';
+
+      if (targetColId !== null) {
+        const found = projectCols.find((c) => c.id === targetColId);
+        if (found) {
+          targetStatus = found.name;
+        }
+      } else if (data.status) {
+        const found = projectCols.find((c) => c.name.toLowerCase() === data.status?.toLowerCase());
+        if (found) {
+          targetColId = found.id;
+        }
+      } else if (projectCols.length > 0) {
+        const defaultCol = projectCols.find((c) => !c.name.toLowerCase().includes('backlog')) || projectCols[0];
+        targetColId = defaultCol.id;
+        targetStatus = defaultCol.name;
+      }
+
+      // Robust sprint resolution: if not specified and not backlog, associate with active sprint if any
+      let targetSprintId: number | null = data.sprint_id ?? null;
+      if (targetSprintId === null && targetStatus.toLowerCase() !== 'backlog') {
+        const activeSprint = sprintsRef.current.find(
+          (s) => s.project_id === currentProject.id && s.status === 'active'
+        );
+        if (activeSprint) {
+          targetSprintId = activeSprint.id;
+        }
+      }
+
+      const taskId = Date.now();
       const newTask: Task = {
-        id: Date.now(),
+        id: taskId,
         project_id: currentProject.id,
-        column_id: data.column_id ?? null,
-        sprint_id: data.sprint_id ?? null,
+        column_id: targetColId,
+        sprint_id: targetSprintId,
         title: data.title?.trim() || 'Nueva Tarea',
         description: data.description || '',
         task_type: data.task_type || 'task',
         priority: data.priority || 'medium',
-        status: data.status || 'To Do',
+        status: targetStatus,
         story_points: data.story_points ?? null,
         assignee_id: primaryAssignee,
         assignee_ids: assignedIds,
@@ -943,106 +1156,195 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         task_key: taskKey,
       };
 
-      setTasks((prev) => [...prev, newTask]);
-      logActivity(newTask.id, 'created');
+      const newLog: ActivityLog = {
+        id: Date.now() + 1,
+        task_id: taskId,
+        user_id: currentUser.id,
+        action: 'created',
+        created_at: new Date().toISOString(),
+        user: currentUser,
+      };
+
+      const updatedTasks = [...allTasks, newTask];
+      const updatedLogs = [newLog, ...activityLogsRef.current];
+
+      setTasks(updatedTasks);
+      setActivityLogs(updatedLogs);
+
+      // Persist immediately to avoid any race conditions or stale snapshot drops
+      persistState({ tasks: updatedTasks, activityLogs: updatedLogs });
+
       return { success: true, task: newTask };
     },
-    [currentProject, currentUser, hasPerm, tasks, logActivity]
+    [currentProject, currentUser, hasPerm, persistState]
   );
 
   const updateTask = useCallback(
     (id: number, data: Partial<Task>) => {
-      const task = tasks.find((t) => t.id === id);
+      const allTasks = tasksRef.current;
+      const task = allTasks.find((t) => t.id === id);
       if (!task) return { success: false, error: 'Tarea no encontrada' };
       if (!canEdit(task)) {
         return { success: false, error: 'No tienes permisos para editar esta tarea' };
       }
 
+      const newLogs: ActivityLog[] = [];
+
       // Log changes
       if (data.status && data.status !== task.status) {
-        logActivity(id, 'moved', 'estado', task.status, data.status);
+        newLogs.push({
+          id: Date.now() + Math.floor(Math.random() * 100),
+          task_id: id,
+          user_id: currentUser?.id || 1,
+          action: 'moved',
+          field_changed: 'estado',
+          old_value: task.status,
+          new_value: data.status,
+          created_at: new Date().toISOString(),
+          user: currentUser || undefined,
+        });
       }
 
       // Handle assignee updates
-      let updatedAssigneeIds = data.assignee_ids !== undefined
-        ? data.assignee_ids
-        : (data.assignee_id !== undefined ? (data.assignee_id ? [data.assignee_id] : []) : task.assignee_ids ?? (task.assignee_id ? [task.assignee_id] : []));
+      let updatedAssigneeIds =
+        data.assignee_ids !== undefined
+          ? data.assignee_ids
+          : data.assignee_id !== undefined
+          ? data.assignee_id
+            ? [data.assignee_id]
+            : []
+          : task.assignee_ids ?? (task.assignee_id ? [task.assignee_id] : []);
       let updatedAssigneeId = updatedAssigneeIds.length > 0 ? updatedAssigneeIds[0] : null;
 
       if (data.assignee_ids !== undefined || data.assignee_id !== undefined) {
         const oldIds = getTaskAssigneeIds(task);
-        const oldNames = oldIds.map((uid) => users.find((u) => u.id === uid)?.name || `ID:${uid}`).join(', ') || 'Sin asignar';
-        const newNames = updatedAssigneeIds.map((uid) => users.find((u) => u.id === uid)?.name || `ID:${uid}`).join(', ') || 'Sin asignar';
+        const oldNames =
+          oldIds.map((uid) => usersRef.current.find((u) => u.id === uid)?.name || `ID:${uid}`).join(', ') ||
+          'Sin asignar';
+        const newNames =
+          updatedAssigneeIds
+            .map((uid) => usersRef.current.find((u) => u.id === uid)?.name || `ID:${uid}`)
+            .join(', ') || 'Sin asignar';
         if (oldNames !== newNames) {
-          logActivity(id, 'edited', 'asignados', oldNames, newNames);
+          newLogs.push({
+            id: Date.now() + Math.floor(Math.random() * 100) + 1,
+            task_id: id,
+            user_id: currentUser?.id || 1,
+            action: 'edited',
+            field_changed: 'asignados',
+            old_value: oldNames,
+            new_value: newNames,
+            created_at: new Date().toISOString(),
+            user: currentUser || undefined,
+          });
         }
       }
 
       if (data.priority && data.priority !== task.priority) {
-        logActivity(id, 'edited', 'prioridad', task.priority, data.priority);
+        newLogs.push({
+          id: Date.now() + Math.floor(Math.random() * 100) + 2,
+          task_id: id,
+          user_id: currentUser?.id || 1,
+          action: 'edited',
+          field_changed: 'prioridad',
+          old_value: task.priority,
+          new_value: data.priority,
+          created_at: new Date().toISOString(),
+          user: currentUser || undefined,
+        });
       }
 
-      setTasks((prev) =>
-        prev.map((t) =>
-          t.id === id
-            ? {
-                ...t,
-                ...data,
-                assignee_id: updatedAssigneeId,
-                assignee_ids: updatedAssigneeIds,
-                updated_at: new Date().toISOString(),
-              }
-            : t
-        )
+      const updatedTasks = allTasks.map((t) =>
+        t.id === id
+          ? {
+              ...t,
+              ...data,
+              assignee_id: updatedAssigneeId,
+              assignee_ids: updatedAssigneeIds,
+              updated_at: new Date().toISOString(),
+            }
+          : t
       );
+      const updatedLogs = [...newLogs, ...activityLogsRef.current];
+
+      setTasks(updatedTasks);
+      if (newLogs.length > 0) {
+        setActivityLogs(updatedLogs);
+      }
+
+      persistState({ tasks: updatedTasks, activityLogs: newLogs.length > 0 ? updatedLogs : undefined });
       return { success: true };
     },
-    [tasks, canEdit, logActivity, users]
+    [canEdit, currentUser, persistState]
   );
 
   const deleteTask = useCallback(
     (id: number) => {
-      const task = tasks.find((t) => t.id === id);
+      const allTasks = tasksRef.current;
+      const task = allTasks.find((t) => t.id === id);
       if (!task) return { success: false, error: 'Tarea no encontrada' };
       if (!hasPerm('delete_any') && task.reporter_id !== currentUser?.id) {
         return { success: false, error: 'Solo puedes eliminar tareas que tú creaste o ser Administrador' };
       }
 
-      setTasks((prev) => prev.filter((t) => t.id !== id));
-      setComments((prev) => prev.filter((c) => c.task_id !== id));
-      setAttachments((prev) => prev.filter((a) => a.task_id !== id));
+      const updatedTasks = allTasks.filter((t) => t.id !== id);
+      const updatedComments = commentsRef.current.filter((c) => c.task_id !== id);
+      const updatedAttachments = attachmentsRef.current.filter((a) => a.task_id !== id);
+
+      setTasks(updatedTasks);
+      setComments(updatedComments);
+      setAttachments(updatedAttachments);
+
+      persistState({ tasks: updatedTasks, comments: updatedComments, attachments: updatedAttachments });
       return { success: true };
     },
-    [tasks, hasPerm, currentUser]
+    [hasPerm, currentUser, persistState]
   );
 
   const moveTask = useCallback(
     (taskId: number, newColumnId: number | null, newPosition?: number) => {
-      const task = tasks.find((t) => t.id === taskId);
+      const allTasks = tasksRef.current;
+      const task = allTasks.find((t) => t.id === taskId);
       if (!task) return;
       if (!hasPerm('move_tasks')) return;
 
-      const oldCol = columns.find((c) => c.id === task.column_id);
-      const newCol = columns.find((c) => c.id === newColumnId);
+      const projectCols = columnsRef.current;
+      const oldCol = projectCols.find((c) => c.id === task.column_id);
+      const newCol = projectCols.find((c) => c.id === newColumnId);
 
+      const newLogs: ActivityLog[] = [];
       if (oldCol && newCol && oldCol.id !== newCol.id) {
-        logActivity(taskId, 'moved', 'columna', oldCol.name, newCol.name);
+        newLogs.push({
+          id: Date.now(),
+          task_id: taskId,
+          user_id: currentUser?.id || 1,
+          action: 'moved',
+          field_changed: 'columna',
+          old_value: oldCol.name,
+          new_value: newCol.name,
+          created_at: new Date().toISOString(),
+          user: currentUser || undefined,
+        });
       }
 
-      setTasks((prev) =>
-        prev.map((t) => {
-          if (t.id !== taskId) return t;
-          return {
-            ...t,
-            column_id: newColumnId,
-            position: newPosition !== undefined ? newPosition : t.position,
-            status: newCol ? newCol.name : t.status,
-            updated_at: new Date().toISOString(),
-          };
-        })
-      );
+      const updatedTasks = allTasks.map((t) => {
+        if (t.id !== taskId) return t;
+        return {
+          ...t,
+          column_id: newColumnId,
+          position: newPosition !== undefined ? newPosition : t.position,
+          status: newCol ? newCol.name : t.status,
+          updated_at: new Date().toISOString(),
+        };
+      });
+      const updatedLogs = [...newLogs, ...activityLogsRef.current];
+
+      setTasks(updatedTasks);
+      if (newLogs.length > 0) setActivityLogs(updatedLogs);
+
+      persistState({ tasks: updatedTasks, activityLogs: newLogs.length > 0 ? updatedLogs : undefined });
     },
-    [tasks, hasPerm, columns, logActivity]
+    [hasPerm, currentUser, persistState]
   );
 
   // Sprints
@@ -1063,38 +1365,44 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         created_at: new Date().toISOString(),
       };
 
-      setSprints((prev) => [...prev, newSprint]);
+      const updated = [...sprintsRef.current, newSprint];
+      setSprints(updated);
+      persistState({ sprints: updated });
       return newSprint;
     },
-    [currentProject, hasPerm]
+    [currentProject, hasPerm, persistState]
   );
 
   const updateSprint = useCallback(
     (id: number, updates: Partial<Sprint>) => {
       if (!hasPerm('manage_sprints')) return;
-      setSprints((prev) => prev.map((s) => (s.id === id ? { ...s, ...updates } : s)));
+      const updated = sprintsRef.current.map((s) => (s.id === id ? { ...s, ...updates } : s));
+      setSprints(updated);
+      persistState({ sprints: updated });
     },
-    [hasPerm]
+    [hasPerm, persistState]
   );
 
   const startSprint = useCallback(
     (sprintId: number) => {
       if (!hasPerm('manage_sprints')) return;
-      setSprints((prev) =>
-        prev.map((s) => (s.id === sprintId ? { ...s, status: 'active' } : s))
-      );
+      const updated = sprintsRef.current.map((s) => (s.id === sprintId ? { ...s, status: 'active' as SprintStatus } : s));
+      setSprints(updated);
+      persistState({ sprints: updated });
     },
-    [hasPerm]
+    [hasPerm, persistState]
   );
 
   const completeSprint = useCallback(
     (sprintId: number) => {
       if (!hasPerm('manage_sprints')) return;
-      setSprints((prev) =>
-        prev.map((s) => (s.id === sprintId ? { ...s, status: 'completed' } : s))
+      const updated = sprintsRef.current.map((s) =>
+        s.id === sprintId ? { ...s, status: 'completed' as SprintStatus } : s
       );
+      setSprints(updated);
+      persistState({ sprints: updated });
     },
-    [hasPerm]
+    [hasPerm, persistState]
   );
 
   // Comments
@@ -1111,21 +1419,38 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         author: currentUser,
       };
 
-      setComments((prev) => [...prev, newComment]);
-      logActivity(taskId, 'commented', 'comentario', undefined, content.substring(0, 30));
+      const newLog: ActivityLog = {
+        id: Date.now() + 1,
+        task_id: taskId,
+        user_id: currentUser.id,
+        action: 'commented',
+        field_changed: 'comentario',
+        new_value: content.substring(0, 30),
+        created_at: new Date().toISOString(),
+        user: currentUser,
+      };
+
+      const updatedComments = [...commentsRef.current, newComment];
+      const updatedLogs = [newLog, ...activityLogsRef.current];
+
+      setComments(updatedComments);
+      setActivityLogs(updatedLogs);
+      persistState({ comments: updatedComments, activityLogs: updatedLogs });
     },
-    [currentUser, logActivity]
+    [currentUser, persistState]
   );
 
   const deleteComment = useCallback(
     (commentId: number) => {
-      const comm = comments.find((c) => c.id === commentId);
+      const comm = commentsRef.current.find((c) => c.id === commentId);
       if (!comm) return;
       if (!hasPerm('delete_any') && comm.user_id !== currentUser?.id) return;
 
-      setComments((prev) => prev.filter((c) => c.id !== commentId));
+      const updated = commentsRef.current.filter((c) => c.id !== commentId);
+      setComments(updated);
+      persistState({ comments: updated });
     },
-    [comments, hasPerm, currentUser]
+    [hasPerm, currentUser, persistState]
   );
 
   // Attachments
@@ -1157,10 +1482,26 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
             size: file.size,
             uploaded_by: currentUser.id,
             created_at: new Date().toISOString(),
+            uploader: currentUser,
           };
 
-          setAttachments((prev) => [newAttachment, ...prev]);
-          logActivity(taskId, 'attached', 'adjunto', undefined, file.name);
+          const newLog: ActivityLog = {
+            id: Date.now() + 1,
+            task_id: taskId,
+            user_id: currentUser.id,
+            action: 'attached',
+            field_changed: 'adjunto',
+            new_value: file.name,
+            created_at: new Date().toISOString(),
+            user: currentUser,
+          };
+
+          const updatedAtt = [newAttachment, ...attachmentsRef.current];
+          const updatedLogs = [newLog, ...activityLogsRef.current];
+
+          setAttachments(updatedAtt);
+          setActivityLogs(updatedLogs);
+          persistState({ attachments: updatedAtt, activityLogs: updatedLogs });
           resolve({ success: true });
         };
         reader.onerror = () => {
@@ -1169,19 +1510,34 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         reader.readAsDataURL(file);
       });
     },
-    [hasPerm, currentUser, logActivity]
+    [hasPerm, currentUser, persistState]
   );
 
   const deleteAttachment = useCallback(
     (attachmentId: number) => {
-      const att = attachments.find((a) => a.id === attachmentId);
+      const att = attachmentsRef.current.find((a) => a.id === attachmentId);
       if (!att) return;
       if (!hasPerm('delete_any')) return;
 
-      logActivity(att.task_id, 'deleted', 'adjunto', att.filename, undefined);
-      setAttachments((prev) => prev.filter((a) => a.id !== attachmentId));
+      const newLog: ActivityLog = {
+        id: Date.now(),
+        task_id: att.task_id,
+        user_id: currentUser?.id || 1,
+        action: 'deleted',
+        field_changed: 'adjunto',
+        old_value: att.filename,
+        created_at: new Date().toISOString(),
+        user: currentUser || undefined,
+      };
+
+      const updatedAtt = attachmentsRef.current.filter((a) => a.id !== attachmentId);
+      const updatedLogs = [newLog, ...activityLogsRef.current];
+
+      setAttachments(updatedAtt);
+      setActivityLogs(updatedLogs);
+      persistState({ attachments: updatedAtt, activityLogs: updatedLogs });
     },
-    [attachments, hasPerm, logActivity]
+    [hasPerm, currentUser, persistState]
   );
 
   // Reset to initial seed

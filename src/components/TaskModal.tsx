@@ -28,6 +28,8 @@ import {
 interface TaskModalProps {
   taskId: number | null; // null for creating new task
   initialColumnId?: number | null;
+  initialSprintId?: number | null;
+  initialTaskType?: TaskType;
   isOpen: boolean;
   onClose: () => void;
 }
@@ -35,6 +37,8 @@ interface TaskModalProps {
 export const TaskModal: React.FC<TaskModalProps> = ({
   taskId,
   initialColumnId = null,
+  initialSprintId = null,
+  initialTaskType = 'task',
   isOpen,
   onClose,
 }) => {
@@ -120,12 +124,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     } else {
       setTitle('');
       setDescription('');
-      setTaskType('task');
+      setTaskType(initialTaskType || 'task');
       setPriority('medium');
       setStoryPoints('');
       setAssigneeIds(currentUser ? [currentUser.id] : []);
-      setColumnId(initialColumnId ?? columns[0]?.id ?? '');
-      setSprintId('');
+      setColumnId(initialColumnId !== undefined && initialColumnId !== null ? initialColumnId : (columns[0]?.id ?? ''));
+      setSprintId(initialSprintId !== undefined && initialSprintId !== null ? initialSprintId : '');
       setDueDate('');
       setLabelsInput('');
       setActiveTab('details');
@@ -134,7 +138,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     setUserSearchQuery('');
     setFormError(null);
     setUploadError(null);
-  }, [existingTask, initialColumnId, columns, currentUser, isOpen]);
+  }, [existingTask, initialColumnId, initialSprintId, initialTaskType, columns, currentUser, isOpen]);
 
   if (!isOpen) return null;
 
@@ -170,6 +174,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       .map((l) => l.trim())
       .filter((l) => l.length > 0);
 
+    const targetCol = columns.find((c) => c.id === (columnId === '' ? null : Number(columnId)));
     const taskPayload: Partial<Task> = {
       title: title.trim(),
       description: description.trim(),
@@ -180,6 +185,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       assignee_ids: assigneeIds,
       column_id: columnId === '' ? null : Number(columnId),
       sprint_id: sprintId === '' ? null : Number(sprintId),
+      status: targetCol ? targetCol.name : 'Backlog',
       due_date: dueDate || null,
       labels,
     };

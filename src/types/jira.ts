@@ -16,6 +16,17 @@ export interface User {
   created_at?: string;
 }
 
+export interface ImportUserPayload {
+  name: string;
+  username: string;
+  password?: string;
+  email?: string;
+  role: Role;
+  projectId?: number;
+  projectName?: string;
+  projectKey?: string;
+}
+
 export interface Project {
   id: number;
   name: string;

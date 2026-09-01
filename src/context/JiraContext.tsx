@@ -12,6 +12,7 @@ import {
   TaskAttachment,
   Role,
   Permission,
+  ImportUserPayload,
   hasPermission,
   canEditTask,
   getTaskAssigneeIds,
@@ -28,15 +29,6 @@ import {
 } from '../data/seedData';
 import { db } from '../lib/firebase';
 import { doc, onSnapshot, setDoc } from 'firebase/firestore';
-
-interface ImportUserPayload {
-  name: string;
-  username: string;
-  password?: string;
-  email?: string;
-  role: Role;
-  projectId?: number;
-}
 
 interface JiraContextType {
   currentUser: User | null;
@@ -975,25 +967,106 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const colors = ['#4A90D9', '#36B37E', '#FF5630', '#6554C0', '#00B8D9', '#FFAB00', '#EC4899', '#8B5CF6', '#10B981', '#F97316'];
       const newUsersToAdd: User[] = [];
       const newMembersToAdd: ProjectMember[] = [];
+      const newProjectsToAdd: Project[] = [];
+      const newColsToAdd: BoardColumn[] = [];
 
-      let currentMaxId = usersRef.current.reduce((max, u) => Math.max(max, u.id), 0);
-      let memberMaxId = membersRef.current.reduce((max, m) => Math.max(max, m.id), 0);
+      let currentMaxUserId = usersRef.current.reduce((max, u) => Math.max(max, u.id), 0);
+      let currentMaxMemberId = membersRef.current.reduce((max, m) => Math.max(max, m.id), 0);
+      let currentMaxProjId = projectsRef.current.reduce((max, p) => Math.max(max, p.id), 0);
+      let currentMaxColId = columnsRef.current.reduce((max, c) => Math.max(max, c.id), 0);
 
       const existingUsernames = new Map<string, User>();
       usersRef.current.forEach((u) => existingUsernames.set(u.username.toLowerCase(), u));
+
+      // Helper to find or create project by key or name
+      const findOrCreateProject = (nameOrKey?: string): number | undefined => {
+        if (!nameOrKey || !nameOrKey.trim()) return defaultProjectId;
+        const query = nameOrKey.trim().toLowerCase();
+
+        // 1. Check existing projects
+        const allKnownProjects = [...projectsRef.current, ...newProjectsToAdd];
+        const match = allKnownProjects.find(
+          (p) =>
+            p.id.toString() === query ||
+            p.key.toLowerCase() === query ||
+            p.name.toLowerCase() === query ||
+            p.name.toLowerCase().includes(query)
+        );
+
+        if (match) return match.id;
+
+        // 2. Auto-create project if missing
+        currentMaxProjId += 1;
+        const newProjId = currentMaxProjId;
+        const cleanName = nameOrKey.trim();
+        let derivedKey = cleanName
+          .replace(/[^a-zA-Z0-9]/g, '')
+          .slice(0, 4)
+          .toUpperCase();
+        if (derivedKey.length < 2) {
+          derivedKey = `P${newProjId}`;
+        }
+        // Ensure unique key
+        while (allKnownProjects.some((p) => p.key === derivedKey)) {
+          derivedKey = `${derivedKey}${Math.floor(Math.random() * 9)}`;
+        }
+
+        const newProj: Project = {
+          id: newProjId,
+          name: cleanName,
+          key: derivedKey,
+          description: `Proyecto / Grupo creado automáticamente vía importación CSV`,
+          created_at: new Date().toISOString(),
+        };
+        newProjectsToAdd.push(newProj);
+
+        // Add default Scrum columns for the new project
+        const defaultColNames = [
+          { name: 'Backlog', color: '#DFE1E6', isDone: false },
+          { name: 'To Do', color: '#C3CFE2', isDone: false },
+          { name: 'In Progress', color: '#FFF3CD', isDone: false },
+          { name: 'In Review', color: '#FFE0B2', isDone: false },
+          { name: 'Done', color: '#D4EDDA', isDone: true },
+        ];
+        defaultColNames.forEach((d, idx) => {
+          currentMaxColId += 1;
+          newColsToAdd.push({
+            id: currentMaxColId,
+            project_id: newProjId,
+            name: d.name,
+            position: idx,
+            color: d.color,
+            is_done_column: d.isDone,
+          });
+        });
+
+        // Add creator / PM as admin member of the new project
+        if (currentUser) {
+          currentMaxMemberId += 1;
+          newMembersToAdd.push({
+            id: currentMaxMemberId,
+            project_id: newProjId,
+            user_id: currentUser.id,
+            role: 'admin',
+            created_at: new Date().toISOString(),
+          });
+        }
+
+        return newProjId;
+      };
 
       for (const item of importedUsers) {
         const normalizedUsername = item.username.trim().toLowerCase();
         let targetUser = existingUsernames.get(normalizedUsername);
 
         if (!targetUser) {
-          currentMaxId += 1;
+          currentMaxUserId += 1;
           const avatarColor = colors[Math.floor(Math.random() * colors.length)];
           const createdUser: User = {
-            id: currentMaxId,
+            id: currentMaxUserId,
             name: item.name.trim(),
             username: normalizedUsername,
-            email: item.email?.trim() || `${normalizedUsername}@example.com`,
+            email: item.email?.trim() || `${normalizedUsername}@institucion.edu`,
             avatar_color: avatarColor,
             is_admin: item.role === 'admin',
             role: item.role,
@@ -1005,17 +1078,25 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
           targetUser = createdUser;
         }
 
-        const projId = item.projectId || defaultProjectId;
-        if (projId && targetUser) {
+        // Determine target project ID
+        let resolvedProjectId = item.projectId;
+        if (!resolvedProjectId && (item.projectName || item.projectKey)) {
+          resolvedProjectId = findOrCreateProject(item.projectName || item.projectKey);
+        }
+        if (!resolvedProjectId) {
+          resolvedProjectId = defaultProjectId;
+        }
+
+        if (resolvedProjectId && targetUser) {
           const alreadyMember =
-            membersRef.current.some((m) => m.project_id === projId && m.user_id === targetUser?.id) ||
-            newMembersToAdd.some((m) => m.project_id === projId && m.user_id === targetUser?.id);
+            membersRef.current.some((m) => m.project_id === resolvedProjectId && m.user_id === targetUser?.id) ||
+            newMembersToAdd.some((m) => m.project_id === resolvedProjectId && m.user_id === targetUser?.id);
 
           if (!alreadyMember) {
-            memberMaxId += 1;
+            currentMaxMemberId += 1;
             newMembersToAdd.push({
-              id: memberMaxId,
-              project_id: projId,
+              id: currentMaxMemberId,
+              project_id: resolvedProjectId,
               user_id: targetUser.id,
               role: item.role,
               created_at: new Date().toISOString(),
@@ -1026,14 +1107,24 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       const finalUsers = newUsersToAdd.length > 0 ? [...usersRef.current, ...newUsersToAdd] : usersRef.current;
       const finalMembers = newMembersToAdd.length > 0 ? [...membersRef.current, ...newMembersToAdd] : membersRef.current;
+      const finalProjects = newProjectsToAdd.length > 0 ? [...projectsRef.current, ...newProjectsToAdd] : projectsRef.current;
+      const finalCols = newColsToAdd.length > 0 ? [...columnsRef.current, ...newColsToAdd] : columnsRef.current;
 
       if (newUsersToAdd.length > 0) setUsers(finalUsers);
       if (newMembersToAdd.length > 0) setMembers(finalMembers);
+      if (newProjectsToAdd.length > 0) setProjects(finalProjects);
+      if (newColsToAdd.length > 0) setColumns(finalCols);
 
-      persistState({ users: finalUsers, members: finalMembers });
+      persistState({
+        users: finalUsers,
+        members: finalMembers,
+        projects: finalProjects,
+        columns: finalCols,
+      });
+
       return { success: true, count: importedUsers.length };
     },
-    [hasPerm, persistState]
+    [hasPerm, currentUser, persistState]
   );
 
   // Column operations

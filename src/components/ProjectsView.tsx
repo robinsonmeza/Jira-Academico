@@ -82,15 +82,15 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ onOpenBoard }) => {
             {isPO && (
               <span className="bg-indigo-50 text-indigo-700 border border-indigo-200 text-xs font-semibold px-2.5 py-0.5 rounded-full flex items-center gap-1">
                 <GraduationCap className="w-3.5 h-3.5 text-indigo-600" />
-                Product Owner (Docente) - Acceso Global
+                Product Owner - Gestión Total de Proyectos
               </span>
             )}
           </div>
           <p className="text-xs text-slate-500 mt-1">
             {isPM
-              ? 'Como Project Manager tienes gestión total, importación de usuarios vía CSV y control sobre todos los proyectos.'
+              ? 'Como Project Manager tienes gestión total del sistema, administración de usuarios, importación CSV y control de proyectos.'
               : isPO
-              ? 'Como Product Owner (Docente) tienes acceso y permisos de edición en todos los proyectos y tableros.'
+              ? 'Como Product Owner tienes los mismos accesos de gestión a nivel de proyectos que el Project Manager (proyectos, tableros, sprints, columnas y asignación de miembros).'
               : `Proyectos asignados a tu rol de ${ROLE_LABELS[currentUser?.role || 'frontend']}.`}
           </p>
         </div>
@@ -239,7 +239,7 @@ export const ProjectsView: React.FC<ProjectsViewProps> = ({ onOpenBoard }) => {
                               <Pencil className="w-3.5 h-3.5 text-slate-500" />
                               Editar
                             </button>
-                            {isPM && (
+                            {canManageProjects && (
                               <button
                                 onClick={() => {
                                   handleDelete(project);

@@ -139,8 +139,8 @@ export const ROLE_BADGE_LABELS: Record<Role, string> = {
 };
 
 export const ROLE_DESCRIPTIONS: Record<Role, string> = {
-  admin: 'Gestión total del sistema: proyectos, miembros, importación masiva CSV y configuración.',
-  po: 'Product Owner (Docente): Acceso global a todos los proyectos con permisos completos de edición, planificación y supervisión.',
+  admin: 'Project Manager (Admin): Gestión total del sistema, proyectos, miembros, importación masiva CSV y administración de usuarios.',
+  po: 'Product Owner: Mismos accesos a nivel de proyectos que el Project Manager (proyectos, tableros, columnas, sprints, asignación de miembros y tareas), sin administración de usuarios.',
   frontend: 'Desarrollador Frontend: Crear, editar y mover tareas, adjuntar evidencias, estimar y comentar.',
   backend: 'Desarrollador Backend: Crear, editar y mover tareas, adjuntar evidencias, estimar y comentar.',
 };
@@ -177,13 +177,13 @@ export const PERMISSIONS: Record<Role, Record<Permission, boolean>> = {
     manage_columns: true,
     manage_sprints: true,
     manage_members: true,
-    manage_users: false, // Edición y administración total de usuarios restringida a PM (Admin)
+    manage_users: false, // Administración de cuentas de usuarios restringida al Project Manager (Admin)
     manage_tasks: true,
     move_tasks: true,
     attach: true,
     delete_any: true,
     edit_any: true,
-    import_csv: false, // Solo desde el rol de product manager se accede a importar CSV
+    import_csv: false, // Importación masiva de usuarios CSV reservada al Project Manager (Admin)
   },
   frontend: {
     manage_project: false,

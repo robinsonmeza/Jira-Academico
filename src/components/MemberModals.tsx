@@ -432,8 +432,8 @@ export const MembersModal: React.FC<MembersModalProps> = ({ isOpen, onClose }) =
                       </td>
 
                       <td className="px-4 py-3 hidden md:table-cell text-xs text-slate-500">
-                        {m.role === 'admin' && 'Control total del sistema y proyectos.'}
-                        {m.role === 'po' && 'Acceso global y permisos completos de edición.'}
+                        {m.role === 'admin' && 'Control total del sistema, proyectos y usuarios.'}
+                        {m.role === 'po' && 'Gestión total a nivel de proyectos, tableros y sprints.'}
                         {m.role === 'frontend' && 'Crear, editar, mover tareas y adjuntos Frontend.'}
                         {m.role === 'backend' && 'Crear, editar, mover tareas y adjuntos Backend.'}
                       </td>

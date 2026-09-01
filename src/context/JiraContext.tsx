@@ -481,9 +481,9 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!currentUser) return false;
       // Admin has everything
       if (currentUser.is_admin || currentUser.role === 'admin') return true;
-      // Product Owner has all permissions except import_csv
+      // Product Owner has all project-level permissions, but no admin user/csv import permissions
       if (currentUser.role === 'po') {
-        if (perm === 'import_csv') return false;
+        if (perm === 'manage_users' || perm === 'import_csv') return false;
         return true;
       }
       return hasPermission(currentRole, perm);

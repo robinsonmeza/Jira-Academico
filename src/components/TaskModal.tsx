@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useJira } from '../context/JiraContext';
-import { Task, TaskType, Priority, getTaskAssigneeIds } from '../types/jira';
+import { Task, TaskType, Priority, getTaskAssigneeIds, ROLE_LABELS } from '../types/jira';
 import {
   X,
   Trash2,
@@ -43,10 +43,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   onClose,
 }) => {
   const {
+    currentProject,
     tasks,
     columns,
     sprints,
     users,
+    members,
     currentUser,
     comments,
     activityLogs,
@@ -64,6 +66,16 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   const isEditing = taskId !== null;
   const existingTask = isEditing ? tasks.find((t) => t.id === taskId) : null;
+
+  // Filter users to only those assigned to the current project
+  const projectMemberUserIds = useMemo(() => {
+    if (!currentProject) return new Set<number>();
+    return new Set(members.filter((m) => m.project_id === currentProject.id).map((m) => m.user_id));
+  }, [currentProject, members]);
+
+  const projectUsers = useMemo(() => {
+    return users.filter((u) => projectMemberUserIds.has(u.id));
+  }, [users, projectMemberUserIds]);
 
   // Form State
   const [title, setTitle] = useState('');
@@ -127,7 +139,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({
       setTaskType(initialTaskType || 'task');
       setPriority('medium');
       setStoryPoints('');
-      setAssigneeIds(currentUser ? [currentUser.id] : []);
+      const isCurrentInProject = currentUser ? projectMemberUserIds.has(currentUser.id) : false;
+      setAssigneeIds(isCurrentInProject && currentUser ? [currentUser.id] : []);
       setColumnId(initialColumnId !== undefined && initialColumnId !== null ? initialColumnId : (columns[0]?.id ?? ''));
       setSprintId(initialSprintId !== undefined && initialSprintId !== null ? initialSprintId : '');
       setDueDate('');
@@ -138,7 +151,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
     setUserSearchQuery('');
     setFormError(null);
     setUploadError(null);
-  }, [existingTask, initialColumnId, initialSprintId, initialTaskType, columns, currentUser, isOpen]);
+  }, [existingTask, initialColumnId, initialSprintId, initialTaskType, columns, currentUser, isOpen, projectMemberUserIds]);
 
   if (!isOpen) return null;
 
@@ -157,6 +170,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
   const assignCurrentUser = () => {
     if (!currentUser || !isEditable) return;
+    if (!projectMemberUserIds.has(currentUser.id)) return;
     if (!assigneeIds.includes(currentUser.id)) {
       setAssigneeIds((prev) => [...prev, currentUser.id]);
     }
@@ -588,12 +602,13 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
                       {/* Quick actions */}
                       <div className="flex items-center justify-between px-1 pb-1.5 mb-1.5 border-b border-slate-100 text-[11px]">
-                        <span className="text-slate-400">Seleccionar responsables</span>
+                        <span className="text-slate-400 font-medium">Miembros del proyecto ({projectUsers.length})</span>
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
-                            onClick={() => setAssigneeIds(users.map((u) => u.id))}
+                            onClick={() => setAssigneeIds(projectUsers.map((u) => u.id))}
                             className="text-indigo-600 hover:text-indigo-800 font-semibold"
+                            disabled={projectUsers.length === 0}
                           >
                             Todos
                           </button>
@@ -610,56 +625,67 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
                       {/* User list */}
                       <div className="max-h-48 overflow-y-auto space-y-0.5">
-                        {users
-                          .filter((u) => {
-                            if (!userSearchQuery.trim()) return true;
-                            const q = userSearchQuery.toLowerCase();
-                            return (
-                              u.name.toLowerCase().includes(q) ||
-                              u.username.toLowerCase().includes(q) ||
-                              (u.role && u.role.toLowerCase().includes(q))
-                            );
-                          })
-                          .map((u) => {
-                            const isAssigned = assigneeIds.includes(u.id);
-                            return (
-                              <button
-                                key={u.id}
-                                type="button"
-                                onClick={() => toggleAssignee(u.id)}
-                                className={`w-full px-2 py-1.5 rounded-lg flex items-center justify-between transition-colors text-left ${
-                                  isAssigned
-                                    ? 'bg-indigo-50/80 text-indigo-900 font-semibold'
-                                    : 'hover:bg-slate-50 text-slate-700'
-                                }`}
-                              >
-                                <div className="flex items-center gap-2">
-                                  <div
-                                    className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] text-white font-bold shrink-0"
-                                    style={{ backgroundColor: u.avatar_color }}
-                                  >
-                                    {u.name.charAt(0).toUpperCase()}
-                                  </div>
-                                  <div>
-                                    <div className="text-xs leading-tight">{u.name}</div>
-                                    <div className="text-[10px] text-slate-400 font-mono">
-                                      @{u.username} • {u.role || (u.is_admin ? 'admin' : 'miembro')}
-                                    </div>
-                                  </div>
-                                </div>
+                        {projectUsers.length === 0 ? (
+                          <div className="py-4 px-2 text-center text-slate-400">
+                            <Users className="w-5 h-5 mx-auto mb-1 text-slate-300" />
+                            <p className="text-xs font-medium">No hay usuarios asignados a este proyecto.</p>
+                            <p className="text-[10px] text-slate-400 mt-0.5">Asigna miembros desde la gestión del proyecto.</p>
+                          </div>
+                        ) : (
+                          projectUsers
+                            .filter((u) => {
+                              if (!userSearchQuery.trim()) return true;
+                              const q = userSearchQuery.toLowerCase();
+                              return (
+                                u.name.toLowerCase().includes(q) ||
+                                u.username.toLowerCase().includes(q) ||
+                                (u.role && u.role.toLowerCase().includes(q))
+                              );
+                            })
+                            .map((u) => {
+                              const isAssigned = assigneeIds.includes(u.id);
+                              const projectMembership = members.find((m) => m.project_id === currentProject?.id && m.user_id === u.id);
+                              const displayRole = projectMembership ? ROLE_LABELS[projectMembership.role] || projectMembership.role : u.role || 'miembro';
 
-                                <div
-                                  className={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${
+                              return (
+                                <button
+                                  key={u.id}
+                                  type="button"
+                                  onClick={() => toggleAssignee(u.id)}
+                                  className={`w-full px-2 py-1.5 rounded-lg flex items-center justify-between transition-colors text-left ${
                                     isAssigned
-                                      ? 'bg-indigo-600 border-indigo-600 text-white'
-                                      : 'border-slate-300 bg-white'
+                                      ? 'bg-indigo-50/80 text-indigo-900 font-semibold'
+                                      : 'hover:bg-slate-50 text-slate-700'
                                   }`}
                                 >
-                                  {isAssigned && <Check className="w-3 h-3 stroke-[3]" />}
-                                </div>
-                              </button>
-                            );
-                          })}
+                                  <div className="flex items-center gap-2">
+                                    <div
+                                      className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] text-white font-bold shrink-0 shadow-2xs"
+                                      style={{ backgroundColor: u.avatar_color }}
+                                    >
+                                      {u.name.charAt(0).toUpperCase()}
+                                    </div>
+                                    <div>
+                                      <div className="text-xs leading-tight">{u.name}</div>
+                                      <div className="text-[10px] text-slate-400 font-mono">
+                                        @{u.username} • {displayRole}
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div
+                                    className={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${
+                                      isAssigned
+                                        ? 'bg-indigo-600 border-indigo-600 text-white'
+                                        : 'border-slate-300 bg-white'
+                                    }`}
+                                  >
+                                    {isAssigned && <Check className="w-3 h-3 stroke-[3]" />}
+                                  </div>
+                                </button>
+                              );
+                            })
+                        )}
                       </div>
 
                       <div className="pt-2 mt-1 border-t border-slate-100 text-right">

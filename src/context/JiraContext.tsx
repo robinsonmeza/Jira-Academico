@@ -27,8 +27,35 @@ import {
   INITIAL_COMMENTS,
   INITIAL_ACTIVITY,
 } from '../data/seedData';
-import { db } from '../lib/firebase';
-import { doc, onSnapshot, setDoc } from 'firebase/firestore';
+import {
+  COLLECTIONS,
+  initializeOrMigrateCollections,
+  subscribeToCollection,
+  saveTask,
+  updateTaskPartial,
+  deleteTask as deleteTaskDoc,
+  saveProject,
+  updateProjectPartial,
+  deleteProjectAndAssociated,
+  saveMember,
+  updateMemberPartial,
+  deleteMember as deleteMemberDoc,
+  saveColumn,
+  updateColumnPartial,
+  deleteColumn as deleteColumnDoc,
+  saveSprint,
+  updateSprintPartial,
+  saveComment,
+  deleteComment as deleteCommentDoc,
+  saveActivityLog,
+  saveAttachment,
+  deleteAttachment as deleteAttachmentDoc,
+  saveUser,
+  updateUserPartial,
+  deleteUserAndAssociated,
+  batchSaveEntities,
+  resetAllCollectionsToDemo,
+} from '../lib/firestoreService';
 
 interface JiraContextType {
   currentUser: User | null;
@@ -192,9 +219,9 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const isRemoteUpdate = useRef<boolean>(false);
   const isInitialized = useRef<boolean>(false);
 
-  // Immediate and robust state persister to LocalStorage & Firestore
-  const persistState = useCallback(
-    async (partial?: {
+  // LocalStorage state persister for instant local responsiveness and offline caching
+  const persistLocalState = useCallback(
+    (partial?: {
       users?: User[];
       projects?: Project[];
       members?: ProjectMember[];
@@ -215,7 +242,6 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const a = partial?.activityLogs ?? activityLogsRef.current;
       const att = partial?.attachments ?? attachmentsRef.current;
 
-      // Update LocalStorage immediately for instant local reliability
       localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(u));
       localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(p));
       localStorage.setItem(STORAGE_KEYS.MEMBERS, JSON.stringify(m));
@@ -225,189 +251,119 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       localStorage.setItem(STORAGE_KEYS.COMMENTS, JSON.stringify(c));
       localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify(a));
       localStorage.setItem(STORAGE_KEYS.ATTACHMENTS, JSON.stringify(att));
-
-      try {
-        setIsSyncing(true);
-        const appDocRef = doc(db, 'app_state', 'main');
-        await setDoc(appDocRef, {
-          id: 'main',
-          users: u,
-          projects: p,
-          members: m,
-          columns: col,
-          tasks: t,
-          sprints: sp,
-          comments: c,
-          activityLogs: a,
-          attachments: att,
-          updatedAt: new Date().toISOString(),
-          updatedBy: currentUserId ? `user_${currentUserId}` : 'system',
-        });
-        setIsCloudConnected(true);
-      } catch (err) {
-        console.error('Error saving state directly to Firestore:', err);
-      } finally {
-        setIsSyncing(false);
-      }
     },
-    [currentUserId]
+    []
   );
 
-  // Real-time Firestore Synchronizer (Multi-user safe merge)
+  // Backward compatibility alias
+  const persistState = persistLocalState;
+
+  // Real-time Granular Firestore Subscriptions (Independent Collections - Zero-collision)
   useEffect(() => {
-    const appDocRef = doc(db, 'app_state', 'main');
+    let isMounted = true;
 
-    const unsubscribe = onSnapshot(
-      appDocRef,
-      (snapshot) => {
+    // 1. Ensure granular collections are initialized or migrated from legacy data
+    initializeOrMigrateCollections()
+      .then(() => {
+        if (!isMounted) return;
         setIsCloudConnected(true);
-        if (snapshot.exists()) {
-          const data = snapshot.data();
-          isRemoteUpdate.current = true;
+      })
+      .catch((err) => {
+        console.warn('[Firestore] Initialization notice:', err);
+      });
 
-          if (Array.isArray(data.users)) {
-            setUsers(data.users);
-            localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(data.users));
-          }
-          if (Array.isArray(data.projects)) {
-            setProjects(data.projects);
-            localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(data.projects));
-          }
-          if (Array.isArray(data.members)) {
-            setMembers(data.members);
-            localStorage.setItem(STORAGE_KEYS.MEMBERS, JSON.stringify(data.members));
-          }
-          if (Array.isArray(data.columns)) {
-            setColumns(data.columns);
-            localStorage.setItem(STORAGE_KEYS.COLUMNS, JSON.stringify(data.columns));
-          }
+    // 2. Set up independent real-time subscriptions per collection
+    const unsubs: Array<() => void> = [];
 
-          // Smart merge tasks: ensure no newly created local task is accidentally wiped by a stale snapshot
-          if (Array.isArray(data.tasks)) {
-            const remoteTasks: Task[] = data.tasks;
-            const localTasks = tasksRef.current;
-
-            // Map remote tasks by id
-            const remoteMap = new Map<number, Task>();
-            remoteTasks.forEach((rt) => remoteMap.set(rt.id, rt));
-
-            // Include local tasks that were created/updated very recently (within 2 minutes) and haven't synced yet
-            const now = Date.now();
-            const mergedTasks = [...remoteTasks];
-
-            localTasks.forEach((lt) => {
-              if (!remoteMap.has(lt.id)) {
-                const taskTime = lt.updated_at ? new Date(lt.updated_at).getTime() : lt.id;
-                // If created in the last 2 minutes, keep it
-                if (now - taskTime < 120000) {
-                  mergedTasks.push(lt);
-                }
-              }
-            });
-
-            setTasks(mergedTasks);
-            localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(mergedTasks));
-          }
-
-          if (Array.isArray(data.sprints)) {
-            setSprints(data.sprints);
-            localStorage.setItem(STORAGE_KEYS.SPRINTS, JSON.stringify(data.sprints));
-          }
-          if (Array.isArray(data.comments)) {
-            setComments(data.comments);
-            localStorage.setItem(STORAGE_KEYS.COMMENTS, JSON.stringify(data.comments));
-          }
-          if (Array.isArray(data.activityLogs)) {
-            setActivityLogs(data.activityLogs);
-            localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify(data.activityLogs));
-          }
-          if (Array.isArray(data.attachments)) {
-            setAttachments(data.attachments);
-            localStorage.setItem(STORAGE_KEYS.ATTACHMENTS, JSON.stringify(data.attachments));
-          }
-
-          setTimeout(() => {
-            isRemoteUpdate.current = false;
-            isInitialized.current = true;
-          }, 100);
-        } else {
-          // Initialize Firebase database with initial state if empty
-          const initialPayload = {
-            id: 'main',
-            users: INITIAL_USERS,
-            projects: INITIAL_PROJECTS,
-            members: INITIAL_MEMBERS,
-            columns: INITIAL_COLUMNS,
-            tasks: INITIAL_TASKS,
-            sprints: INITIAL_SPRINTS,
-            comments: INITIAL_COMMENTS,
-            activityLogs: INITIAL_ACTIVITY,
-            attachments: [],
-            updatedAt: new Date().toISOString(),
-            updatedBy: 'system',
-          };
-          setDoc(appDocRef, initialPayload)
-            .then(() => {
-              isInitialized.current = true;
-            })
-            .catch((err) => {
-              console.error('Error seeding initial Firestore state:', err);
-            });
+    unsubs.push(
+      subscribeToCollection<User>(COLLECTIONS.USERS, (items) => {
+        if (items && items.length > 0) {
+          setUsers(items);
+          localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(items));
         }
-      },
-      (error) => {
-        console.warn('Firestore connection notice:', error.message);
-        setIsCloudConnected(false);
-        isInitialized.current = true;
-      }
+      })
     );
 
-    return () => unsubscribe();
+    unsubs.push(
+      subscribeToCollection<Project>(COLLECTIONS.PROJECTS, (items) => {
+        if (items && items.length > 0) {
+          setProjects(items);
+          localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(items));
+        }
+      })
+    );
+
+    unsubs.push(
+      subscribeToCollection<ProjectMember>(COLLECTIONS.MEMBERS, (items) => {
+        if (items && items.length > 0) {
+          setMembers(items);
+          localStorage.setItem(STORAGE_KEYS.MEMBERS, JSON.stringify(items));
+        }
+      })
+    );
+
+    unsubs.push(
+      subscribeToCollection<BoardColumn>(COLLECTIONS.COLUMNS, (items) => {
+        if (items && items.length > 0) {
+          // Keep columns ordered by position
+          const sorted = [...items].sort((a, b) => a.position - b.position);
+          setColumns(sorted);
+          localStorage.setItem(STORAGE_KEYS.COLUMNS, JSON.stringify(sorted));
+        }
+      })
+    );
+
+    unsubs.push(
+      subscribeToCollection<Task>(COLLECTIONS.TASKS, (items) => {
+        if (items && items.length > 0) {
+          setTasks(items);
+          localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(items));
+        }
+      })
+    );
+
+    unsubs.push(
+      subscribeToCollection<Sprint>(COLLECTIONS.SPRINTS, (items) => {
+        if (items && items.length > 0) {
+          setSprints(items);
+          localStorage.setItem(STORAGE_KEYS.SPRINTS, JSON.stringify(items));
+        }
+      })
+    );
+
+    unsubs.push(
+      subscribeToCollection<TaskComment>(COLLECTIONS.COMMENTS, (items) => {
+        if (items && items.length > 0) {
+          setComments(items);
+          localStorage.setItem(STORAGE_KEYS.COMMENTS, JSON.stringify(items));
+        }
+      })
+    );
+
+    unsubs.push(
+      subscribeToCollection<ActivityLog>(COLLECTIONS.ACTIVITY_LOGS, (items) => {
+        if (items && items.length > 0) {
+          const sorted = [...items].sort(
+            (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+          );
+          setActivityLogs(sorted);
+          localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify(sorted));
+        }
+      })
+    );
+
+    unsubs.push(
+      subscribeToCollection<TaskAttachment>(COLLECTIONS.ATTACHMENTS, (items) => {
+        setAttachments(items || []);
+        localStorage.setItem(STORAGE_KEYS.ATTACHMENTS, JSON.stringify(items || []));
+      })
+    );
+
+    return () => {
+      isMounted = false;
+      unsubs.forEach((unsub) => unsub());
+    };
   }, []);
-
-  // Push local state mutations to Cloud Firestore & LocalStorage
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
-    localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(projects));
-    localStorage.setItem(STORAGE_KEYS.MEMBERS, JSON.stringify(members));
-    localStorage.setItem(STORAGE_KEYS.COLUMNS, JSON.stringify(columns));
-    localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(tasks));
-    localStorage.setItem(STORAGE_KEYS.SPRINTS, JSON.stringify(sprints));
-    localStorage.setItem(STORAGE_KEYS.COMMENTS, JSON.stringify(comments));
-    localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify(activityLogs));
-    localStorage.setItem(STORAGE_KEYS.ATTACHMENTS, JSON.stringify(attachments));
-
-    if (isRemoteUpdate.current || !isInitialized.current) {
-      return;
-    }
-
-    const timer = setTimeout(async () => {
-      try {
-        setIsSyncing(true);
-        const appDocRef = doc(db, 'app_state', 'main');
-        await setDoc(appDocRef, {
-          id: 'main',
-          users,
-          projects,
-          members,
-          columns,
-          tasks,
-          sprints,
-          comments,
-          activityLogs,
-          attachments,
-          updatedAt: new Date().toISOString(),
-          updatedBy: currentUserId ? `user_${currentUserId}` : 'unknown',
-        });
-      } catch (err) {
-        console.error('Error saving state to Firestore:', err);
-      } finally {
-        setIsSyncing(false);
-      }
-    }, 300);
-
-    return () => clearTimeout(timer);
-  }, [users, projects, members, columns, tasks, sprints, comments, activityLogs, attachments, currentUserId]);
 
   useEffect(() => {
     if (currentUserId !== null) {
@@ -669,6 +625,11 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const updatedMembers = newMembers.length > 0 ? [...membersRef.current, ...newMembers] : membersRef.current;
       persistState({ projects: updatedProjects, columns: updatedCols, members: updatedMembers });
 
+      // Granular Firestore sync
+      saveProject(newProj).catch((err) => console.error('[Firestore] Error saving project:', err));
+      defaultCols.forEach((c) => saveColumn(c).catch((err) => console.error('[Firestore] Error saving column:', err)));
+      newMembers.forEach((m) => saveMember(m).catch((err) => console.error('[Firestore] Error saving member:', err)));
+
       return { success: true };
     },
     [hasPerm, currentUser, persistState]
@@ -684,6 +645,12 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       );
       setProjects(updated);
       persistState({ projects: updated });
+
+      // Granular Firestore sync
+      updateProjectPartial(id, { name: name.trim(), description: description.trim() }).catch((err) =>
+        console.error('[Firestore] Error updating project:', err)
+      );
+
       return { success: true };
     },
     [hasPerm, persistState]
@@ -694,6 +661,11 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!hasPerm('manage_project')) {
         return { success: false, error: 'No tienes permisos para eliminar proyectos' };
       }
+      const taskIds = tasksRef.current.filter((t) => t.project_id === id).map((t) => t.id);
+      const colIds = columnsRef.current.filter((c) => c.project_id === id).map((c) => c.id);
+      const memIds = membersRef.current.filter((m) => m.project_id === id).map((m) => m.id);
+      const spIds = sprintsRef.current.filter((s) => s.project_id === id).map((s) => s.id);
+
       const updatedProj = projectsRef.current.filter((p) => p.id !== id);
       const updatedCols = columnsRef.current.filter((c) => c.project_id !== id);
       const updatedTasks = tasksRef.current.filter((t) => t.project_id !== id);
@@ -717,6 +689,11 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         sprints: updatedSprints,
         members: updatedMembers,
       });
+
+      // Granular Firestore deletion
+      deleteProjectAndAssociated(id, taskIds, colIds, memIds, spIds).catch((err) =>
+        console.error('[Firestore] Error deleting project documents:', err)
+      );
 
       return { success: true };
     },
@@ -742,6 +719,7 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       );
       let userId: number;
       let updatedUsers = usersRef.current;
+      let createdUserObj: User | null = null;
 
       if (existingUser) {
         userId = existingUser.id;
@@ -760,6 +738,7 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
           password: data.password || '123456',
           created_at: new Date().toISOString(),
         };
+        createdUserObj = newUser;
         updatedUsers = [...usersRef.current, newUser];
         setUsers(updatedUsers);
       }
@@ -783,6 +762,12 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const updatedMembers = [...membersRef.current, newMember];
       setMembers(updatedMembers);
       persistState({ users: updatedUsers, members: updatedMembers });
+
+      // Granular Firestore sync
+      if (createdUserObj) {
+        saveUser(createdUserObj).catch((err) => console.error('[Firestore] Error saving new user:', err));
+      }
+      saveMember(newMember).catch((err) => console.error('[Firestore] Error saving new member:', err));
 
       return { success: true };
     },
@@ -809,6 +794,10 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const updated = [...membersRef.current, newMember];
       setMembers(updated);
       persistState({ members: updated });
+
+      // Granular Firestore sync
+      saveMember(newMember).catch((err) => console.error('[Firestore] Error saving member:', err));
+
       return { success: true };
     },
     [hasPerm, persistState]
@@ -820,6 +809,11 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const updated = membersRef.current.map((m) => (m.id === memberId ? { ...m, role } : m));
       setMembers(updated);
       persistState({ members: updated });
+
+      // Granular Firestore sync
+      updateMemberPartial(memberId, { role }).catch((err) =>
+        console.error('[Firestore] Error updating member role:', err)
+      );
     },
     [hasPerm, persistState]
   );
@@ -830,6 +824,9 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const updated = membersRef.current.filter((m) => m.id !== memberId);
       setMembers(updated);
       persistState({ members: updated });
+
+      // Granular Firestore deletion
+      deleteMemberDoc(memberId).catch((err) => console.error('[Firestore] Error deleting member:', err));
     },
     [hasPerm, persistState]
   );
@@ -904,6 +901,17 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setMembers(updatedMembers);
       persistState({ users: updatedUsers, members: updatedMembers });
 
+      // Granular Firestore sync
+      const target = updatedUsers.find((u) => u.id === userId);
+      if (target) {
+        saveUser(target).catch((err) => console.error('[Firestore] Error saving user:', err));
+      }
+      if (projectIds !== undefined) {
+        updatedMembers
+          .filter((m) => m.user_id === userId)
+          .forEach((m) => saveMember(m).catch((err) => console.error('[Firestore] Error saving member:', err)));
+      }
+
       return { success: true };
     },
     [currentUser, persistState]
@@ -921,6 +929,7 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: 'No es posible eliminar al único Project Manager activo del sistema' };
       }
 
+      const memberIdsToDelete = membersRef.current.filter((m) => m.user_id === userId).map((m) => m.id);
       const updatedUsers = usersRef.current.filter((u) => u.id !== userId);
       const updatedMembers = membersRef.current.filter((m) => m.user_id !== userId);
       const updatedTasks = tasksRef.current.map((t) => {
@@ -948,6 +957,12 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       persistState({ users: updatedUsers, members: updatedMembers, tasks: updatedTasks });
+
+      // Granular Firestore sync
+      deleteUserAndAssociated(userId, memberIdsToDelete, updatedTasks).catch((err) =>
+        console.error('[Firestore] Error deleting user:', err)
+      );
+
       return { success: true };
     },
     [currentUser, currentUserId, persistState]
@@ -1122,6 +1137,14 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
         columns: finalCols,
       });
 
+      // Granular Firestore batch sync
+      batchSaveEntities({
+        users: newUsersToAdd,
+        members: newMembersToAdd,
+        projects: newProjectsToAdd,
+        columns: newColsToAdd,
+      }).catch((err) => console.error('[Firestore] Error saving batch imported entities:', err));
+
       return { success: true, count: importedUsers.length };
     },
     [hasPerm, currentUser, persistState]
@@ -1143,6 +1166,9 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const updated = [...columnsRef.current, newCol];
       setColumns(updated);
       persistState({ columns: updated });
+
+      // Granular Firestore sync
+      saveColumn(newCol).catch((err) => console.error('[Firestore] Error saving column:', err));
     },
     [currentProject, hasPerm, persistState]
   );
@@ -1153,6 +1179,9 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const updated = columnsRef.current.map((c) => (c.id === id ? { ...c, ...updates } : c));
       setColumns(updated);
       persistState({ columns: updated });
+
+      // Granular Firestore sync
+      updateColumnPartial(id, updates).catch((err) => console.error('[Firestore] Error updating column:', err));
     },
     [hasPerm, persistState]
   );
@@ -1165,6 +1194,16 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setColumns(updatedCols);
       setTasks(updatedTasks);
       persistState({ columns: updatedCols, tasks: updatedTasks });
+
+      // Granular Firestore deletion and task updates
+      deleteColumnDoc(id).catch((err) => console.error('[Firestore] Error deleting column:', err));
+      tasksRef.current
+        .filter((t) => t.column_id === id)
+        .forEach((t) =>
+          updateTaskPartial(t.id, { column_id: null }).catch((err) =>
+            console.error('[Firestore] Error updating task column:', err)
+          )
+        );
     },
     [hasPerm, persistState]
   );
@@ -1262,8 +1301,12 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setTasks(updatedTasks);
       setActivityLogs(updatedLogs);
 
-      // Persist immediately to avoid any race conditions or stale snapshot drops
+      // Persist locally for instant responsiveness
       persistState({ tasks: updatedTasks, activityLogs: updatedLogs });
+
+      // Granular Firestore sync
+      saveTask(newTask).catch((err) => console.error('[Firestore] Error saving task:', err));
+      saveActivityLog(newLog).catch((err) => console.error('[Firestore] Error saving activity log:', err));
 
       return { success: true, task: newTask };
     },
@@ -1364,6 +1407,15 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       persistState({ tasks: updatedTasks, activityLogs: newLogs.length > 0 ? updatedLogs : undefined });
+
+      // Granular Firestore sync - only update this specific task document without touching other tasks!
+      updateTaskPartial(id, {
+        ...data,
+        assignee_id: updatedAssigneeId,
+        assignee_ids: updatedAssigneeIds,
+      }).catch((err) => console.error('[Firestore] Error updating task:', err));
+      newLogs.forEach((l) => saveActivityLog(l).catch((err) => console.error('[Firestore] Error saving log:', err)));
+
       return { success: true };
     },
     [canEdit, currentUser, persistState]
@@ -1387,6 +1439,10 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setAttachments(updatedAttachments);
 
       persistState({ tasks: updatedTasks, comments: updatedComments, attachments: updatedAttachments });
+
+      // Granular Firestore deletion
+      deleteTaskDoc(id).catch((err) => console.error('[Firestore] Error deleting task:', err));
+
       return { success: true };
     },
     [hasPerm, currentUser, persistState]
@@ -1434,6 +1490,14 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (newLogs.length > 0) setActivityLogs(updatedLogs);
 
       persistState({ tasks: updatedTasks, activityLogs: newLogs.length > 0 ? updatedLogs : undefined });
+
+      // Granular Firestore sync for moved task
+      updateTaskPartial(taskId, {
+        column_id: newColumnId,
+        position: newPosition !== undefined ? newPosition : task.position,
+        status: newCol ? newCol.name : task.status,
+      }).catch((err) => console.error('[Firestore] Error moving task:', err));
+      newLogs.forEach((l) => saveActivityLog(l).catch((err) => console.error('[Firestore] Error saving log:', err)));
     },
     [hasPerm, currentUser, persistState]
   );
@@ -1459,6 +1523,10 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const updated = [...sprintsRef.current, newSprint];
       setSprints(updated);
       persistState({ sprints: updated });
+
+      // Granular Firestore sync
+      saveSprint(newSprint).catch((err) => console.error('[Firestore] Error saving sprint:', err));
+
       return newSprint;
     },
     [currentProject, hasPerm, persistState]
@@ -1470,6 +1538,9 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const updated = sprintsRef.current.map((s) => (s.id === id ? { ...s, ...updates } : s));
       setSprints(updated);
       persistState({ sprints: updated });
+
+      // Granular Firestore sync
+      updateSprintPartial(id, updates).catch((err) => console.error('[Firestore] Error updating sprint:', err));
     },
     [hasPerm, persistState]
   );
@@ -1480,6 +1551,11 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const updated = sprintsRef.current.map((s) => (s.id === sprintId ? { ...s, status: 'active' as SprintStatus } : s));
       setSprints(updated);
       persistState({ sprints: updated });
+
+      // Granular Firestore sync
+      updateSprintPartial(sprintId, { status: 'active' }).catch((err) =>
+        console.error('[Firestore] Error starting sprint:', err)
+      );
     },
     [hasPerm, persistState]
   );
@@ -1492,6 +1568,11 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       );
       setSprints(updated);
       persistState({ sprints: updated });
+
+      // Granular Firestore sync
+      updateSprintPartial(sprintId, { status: 'completed' }).catch((err) =>
+        console.error('[Firestore] Error completing sprint:', err)
+      );
     },
     [hasPerm, persistState]
   );
@@ -1527,6 +1608,10 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setComments(updatedComments);
       setActivityLogs(updatedLogs);
       persistState({ comments: updatedComments, activityLogs: updatedLogs });
+
+      // Granular Firestore sync
+      saveComment(newComment).catch((err) => console.error('[Firestore] Error saving comment:', err));
+      saveActivityLog(newLog).catch((err) => console.error('[Firestore] Error saving comment log:', err));
     },
     [currentUser, persistState]
   );
@@ -1540,6 +1625,9 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const updated = commentsRef.current.filter((c) => c.id !== commentId);
       setComments(updated);
       persistState({ comments: updated });
+
+      // Granular Firestore deletion
+      deleteCommentDoc(commentId).catch((err) => console.error('[Firestore] Error deleting comment:', err));
     },
     [hasPerm, currentUser, persistState]
   );
@@ -1593,6 +1681,11 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setAttachments(updatedAtt);
           setActivityLogs(updatedLogs);
           persistState({ attachments: updatedAtt, activityLogs: updatedLogs });
+
+          // Granular Firestore sync
+          saveAttachment(newAttachment).catch((err) => console.error('[Firestore] Error saving attachment:', err));
+          saveActivityLog(newLog).catch((err) => console.error('[Firestore] Error saving attachment log:', err));
+
           resolve({ success: true });
         };
         reader.onerror = () => {
@@ -1627,6 +1720,10 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setAttachments(updatedAtt);
       setActivityLogs(updatedLogs);
       persistState({ attachments: updatedAtt, activityLogs: updatedLogs });
+
+      // Granular Firestore deletion
+      deleteAttachmentDoc(attachmentId).catch((err) => console.error('[Firestore] Error deleting attachment:', err));
+      saveActivityLog(newLog).catch((err) => console.error('[Firestore] Error saving delete attachment log:', err));
     },
     [hasPerm, currentUser, persistState]
   );
@@ -1647,21 +1744,7 @@ export const JiraProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.clear();
 
     try {
-      const appDocRef = doc(db, 'app_state', 'main');
-      await setDoc(appDocRef, {
-        id: 'main',
-        users: INITIAL_USERS,
-        projects: INITIAL_PROJECTS,
-        members: INITIAL_MEMBERS,
-        columns: INITIAL_COLUMNS,
-        tasks: INITIAL_TASKS,
-        sprints: INITIAL_SPRINTS,
-        comments: INITIAL_COMMENTS,
-        activityLogs: INITIAL_ACTIVITY,
-        attachments: [],
-        updatedAt: new Date().toISOString(),
-        updatedBy: 'reset',
-      });
+      await resetAllCollectionsToDemo();
     } catch (err) {
       console.error('Error resetting Firestore state:', err);
     }

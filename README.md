@@ -1,9 +1,9 @@
 # Jira Board Clone - Documentación Técnica y Funcional
 
-> **Versión**: 2.5.0  
+> **Versión**: 3.0.0  
 > **Estado**: Producción / Desplegado en Vercel & Firebase Cloud Firestore  
 > **Autor Principal / Project Manager**: Robinson Meza (`RobinsonAmeza@gmail.com`)  
-> **Arquitectura**: React 18 + Vite + TypeScript + Tailwind CSS + Google Cloud Firestore (Firebase)
+> **Arquitectura**: React 18 + Vite + TypeScript + Tailwind CSS + Google Cloud Firestore Granular (Firebase)
 
 ---
 
@@ -13,23 +13,34 @@
 
 ---
 
-## 2. Novedades y Actualizaciones Recientes (v2.5.0)
+## 2. Novedades y Arquitectura de Concurrencia v3.0.0 (Solución de Concurrencia Multi-Estudiante)
 
-1. **Persistencia en la Nube con Google Cloud Firestore (Firebase)**:
-   - Sincronización en tiempo real (`onSnapshot`) entre múltiples navegadores, dispositivos y usuarios concurrentes.
-   - Guardado continuo de tareas, sprints, proyectos, usuarios, columnas, comentarios y registros de actividad.
-   - Soporte offline con respaldo local en `localStorage`.
-   - Indicador de estado en vivo en la barra superior (**Cloud Activo** / **Guardando...** / **Offline**).
+### 2.1 Diagnóstico de la Problemática Anterior (v2.5.0)
+En versiones previas, todo el estado de la aplicación se guardaba en un único documento monolítico (`app_state/main`). Cuando dos o más estudiantes trabajaban en el mismo proyecto al mismo tiempo (por ejemplo, el Estudiante A movía una tarea mientras el Estudiante B creaba o editaba otra), la operación `setDoc` de uno sobreescribía todo el documento, borrando los cambios del compañero (condición de carrera o *last-write-wins*).
 
-2. **Acceso Seguro y Flujo de Entrada (Landing / Login)**:
-   - Los usuarios aterrizan de forma obligatoria en la pantalla de **Inicio de Sesión**.
-   - **Administración Centralizada**: Se descartó el autoregistro público. Solo el Project Manager (Admin) puede crear o importar cuentas de usuario.
-   - **Eliminación de Accesos Rápidos de 1 Clic**: Se eliminaron los botones de cambio rápido de usuario que exponían la cuenta del administrador.
+### 2.2 Arquitectura Granular de Colecciones (Opción A Implementada)
+Para resolver de forma definitiva este problema y permitir alta concurrencia:
 
-3. **Módulo de Administración y Creación de Usuarios**:
-   - Creación individual con credenciales personalizadas, asignación de proyectos y rol.
-   - **Importación Masiva vía CSV**: Carga por lotes de estudiantes o desarrolladores asignándoles usuario, contraseña, correo, rol y proyecto inicial.
-   - Edición y eliminación de usuarios con protección para evitar borrar al único administrador.
+1. **Colecciones Granulares en Firestore**:
+   - Cada entidad ahora reside en su propia colección independiente:
+     - `tasks/{taskId}`: Cada tarea se crea, actualiza o mueve como un documento atómico.
+     - `projects/{projectId}`: Proyectos de trabajo.
+     - `members/{memberId}`: Membresías y roles por proyecto.
+     - `columns/{columnId}`: Columnas del tablero Kanban/Scrum.
+     - `sprints/{sprintId}`: Sprints planificados, activos y completados.
+     - `comments/{commentId}`: Comentarios individuales en tareas.
+     - `activity_logs/{logId}`: Registro de auditoría y movimientos.
+     - `users/{userId}`: Cuentas y credenciales de usuario.
+     - `attachments/{attachmentId}`: Archivos adjuntos en tareas.
+
+2. **Cero Conflictos entre Estudiantes**:
+   - Si el Estudiante 1 edita la descripción de la tarea `PRJ-4` y el Estudiante 2 mueve la tarea `PRJ-8` a *In Progress*, Firestore actualiza exclusivamente el documento `tasks/PRJ-4` y `tasks/PRJ-8` respectivamente. **Ningún cambio se pisa ni se elimina**.
+
+3. **Migración Automática e Inicialización Transparente**:
+   - El servicio `firestoreService.ts` inspecciona si las nuevas colecciones ya cuentan con datos. Si no, migra automáticamente los datos existentes desde el documento legacy `app_state/main` o desde las semillas iniciales sin perder ningún proyecto o tarea.
+
+4. **Reactividad Inmediata + Sincronización en Tiempo Real**:
+   - Los componentes reaccionan instantáneamente gracias al estado local reactivo y suscripciones individuales `onSnapshot` por colección.
 
 ---
 
@@ -50,7 +61,7 @@ La plataforma cuenta con 4 roles definidos:
 
 ```text
 ├── firebase-applet-config.json     # Configuración de credenciales de Firebase
-├── firebase-blueprint.json         # Esquema de entidades de Firestore
+├── firebase-blueprint.json         # Esquema de entidades granulares de Firestore
 ├── firestore.rules                 # Reglas de seguridad de Firestore
 ├── index.html                      # Punto de entrada HTML
 ├── package.json                    # Dependencias del proyecto
@@ -61,11 +72,12 @@ La plataforma cuenta con 4 roles definidos:
 │   ├── types/
 │   │   └── jira.ts                 # Interfaces TypeScript, Roles y Permisos
 │   ├── lib/
-│   │   └── firebase.ts             # Inicialización del cliente Firestore
+│   │   ├── firebase.ts             # Inicialización de la instancia Firestore
+│   │   └── firestoreService.ts     # CRUD granular, batch operations y migración atómica
 │   ├── data/
 │   │   └── seedData.ts             # Datos semilla iniciales del sistema
 │   ├── context/
-│   │   └── JiraContext.tsx         # Estado global y sincronización con Firestore
+│   │   └── JiraContext.tsx         # Estado global y suscripciones en tiempo real
 │   └── components/
 │       ├── Navbar.tsx              # Barra superior, selector de proyecto y perfil
 │       ├── LoginView.tsx           # Pantalla de inicio de sesión segura
@@ -82,26 +94,19 @@ La plataforma cuenta con 4 roles definidos:
 
 ---
 
-## 5. Modelo de Datos (Firestore Schema)
+## 5. Modelo de Datos Granular (Firestore Collections)
 
-El documento principal se almacena en la colección `app_state` bajo el identificador `main`:
+A partir de la versión 3.0.0, Firestore utiliza colecciones independientes:
 
-```typescript
-interface AppStateDocument {
-  id: "main";
-  users: User[];
-  projects: Project[];
-  members: ProjectMember[];
-  columns: BoardColumn[];
-  tasks: Task[];
-  sprints: Sprint[];
-  comments: TaskComment[];
-  activityLogs: ActivityLog[];
-  attachments: TaskAttachment[];
-  updatedAt: string; // ISO Date
-  updatedBy: string;
-}
-```
+- `tasks`: Documentos identificados por `taskId` con propiedades (`title`, `status`, `column_id`, `assignee_ids`, etc.).
+- `projects`: Documentos identificados por `projectId`.
+- `columns`: Documentos identificados por `columnId`.
+- `members`: Documentos identificados por `memberId`.
+- `sprints`: Documentos identificados por `sprintId`.
+- `comments`: Documentos identificados por `commentId`.
+- `activity_logs`: Documentos identificados por `logId`.
+- `users`: Documentos identificados por `userId`.
+- `attachments`: Documentos identificados por `attachmentId`.
 
 ---
 
@@ -121,7 +126,7 @@ interface AppStateDocument {
 Para sincronizar las ramas y disparar el despliegue continuo:
 ```bash
 git add .
-git commit -m "feat: Sincronización Firestore en tiempo real y Login seguro"
+git commit -m "feat: Arquitectura granular de colecciones Firestore para soporte multiusuario"
 git push origin main
 ```
 
@@ -130,4 +135,4 @@ git push origin main
 ## 7. Próximos Pasos Sugeridos
 - [ ] Exportación de reportes de Sprint en formato PDF / Excel.
 - [ ] Notificaciones en tiempo real al ser mencionado en comentarios de tareas.
-- [ ] Asignación de múltiples responsables por tarea.
+- [ ] Filtros avanzados por etiquetas y múltiples responsables.

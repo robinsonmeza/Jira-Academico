@@ -95,6 +95,55 @@ ROLES:
 - Project Manager / Admin: Coordinación de flujo y supervisión de tablero.
 `;
 
+// High-availability model cascade for Gemini API
+// Prioritizing gemini-3.8-flash (primary, ~2.5s) and gemini-3.1-flash-lite (ultra-fast, <1s, highest availability)
+const GEMINI_TEXT_MODELS = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-3.5-flash', 'gemini-flash-latest'];
+
+async function executeGeminiWithFallback(
+  ai: ReturnType<typeof getGeminiClient>,
+  options: {
+    contents: any;
+    systemInstruction?: string;
+    temperature?: number;
+    timeoutPerAttemptMs?: number;
+  }
+): Promise<string> {
+  const { contents, systemInstruction, temperature = 0.7, timeoutPerAttemptMs = 7500 } = options;
+  let lastError: any = null;
+
+  for (const modelName of GEMINI_TEXT_MODELS) {
+    try {
+      const callPromise = ai.models.generateContent({
+        model: modelName,
+        contents,
+        config: {
+          systemInstruction,
+          temperature,
+        },
+      });
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(`Timeout de ${timeoutPerAttemptMs}ms en ${modelName}`));
+        }, timeoutPerAttemptMs);
+        if (typeof timer.unref === 'function') timer.unref();
+      });
+
+      const response = await Promise.race([callPromise, timeoutPromise]);
+      const text = response.text || '';
+      if (text && text.trim().length > 0) {
+        return text;
+      }
+    } catch (err: any) {
+      console.warn(`[AI Fallback] ${modelName} error (${err?.message || err}), trying next model...`);
+      lastError = err;
+    }
+  }
+
+  if (lastError) throw lastError;
+  return '';
+}
+
 // API endpoint for multi-turn chat
 app.post('/api/ai/chat', async (req, res) => {
   try {
@@ -118,64 +167,34 @@ app.post('/api/ai/chat', async (req, res) => {
       }
     }
 
-    // Convert messages to Gemini format (user / model)
-    const contents = messages.map((m: { role: string; content: string }) => ({
+    // Filter and sanitize messages to ensure valid Gemini turns
+    const validMessages = messages.filter((m: any) => m && m.content && m.content.trim().length > 0);
+    const contents = validMessages.map((m: { role: string; content: string }) => ({
       role: m.role === 'user' ? 'user' : 'model',
       parts: [{ text: m.content }],
     }));
 
-    // Call Gemini with automatic fallback models in case of temporary 503 high demand
-    // gemini-3.5-flash is currently highly available with lowest 503 saturation
-    const fallbackModels = ['gemini-3.5-flash', 'gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.1-flash-lite'];
-    let lastError: any = null;
     let replyText = '';
-
-    for (const modelName of fallbackModels) {
-      try {
-        const response = await ai.models.generateContent({
-          model: modelName,
-          contents,
-          config: {
-            systemInstruction: dynamicSystemPrompt,
-            temperature: 0.7,
-          },
-        });
-        replyText = response.text || '';
-        if (replyText) {
-          lastError = null;
-          break;
-        }
-      } catch (err: any) {
-        console.warn(`Model ${modelName} returned error, trying fallback...`, err?.message);
-        lastError = err;
-      }
+    try {
+      replyText = await executeGeminiWithFallback(ai, {
+        contents,
+        systemInstruction: dynamicSystemPrompt,
+        temperature: 0.7,
+        timeoutPerAttemptMs: 7000,
+      });
+    } catch (geminiErr: any) {
+      console.error('All primary Gemini models were unavailable:', geminiErr?.message);
     }
 
-    // If Gemini fails or hits high-demand across all models, fallback to NVIDIA NIM (Llama 3.3 70B)
+    // Safe fallback if cloud is under peak demand
     if (!replyText) {
-      try {
-        console.info('Attempting resilient fallback to NVIDIA NIM (meta/llama-3.3-70b-instruct)...');
-        const nvidiaMessages = [
-          { role: 'system', content: dynamicSystemPrompt },
-          ...messages.map((m: { role: string; content: string }) => ({
-            role: m.role === 'assistant' ? 'assistant' : 'user',
-            content: m.content,
-          })),
-        ];
-        replyText = await callNvidiaNim(nvidiaMessages);
-        if (replyText) {
-          lastError = null;
-        }
-      } catch (nvidiaErr: any) {
-        console.error('NVIDIA NIM fallback also failed:', nvidiaErr?.message);
-      }
+      return res.json({
+        reply: `⚠️ **Aviso de Alta Demanda en Servidores**: En este momento los servidores de IA están procesando una alta carga de solicitudes simultáneas en Google Cloud.\n\nPor favor pulsa **Reintentar consulta** en unos instantes para recibir tu respuesta pedagógica.\n\n*Recuerda que una Historia de Usuario estándar sigue:* \n> "Como [rol], quiero [acción] para [beneficio]".`,
+        isTransientNotice: true,
+      });
     }
 
-    if (lastError && !replyText) {
-      throw lastError;
-    }
-
-    return res.json({ reply: replyText || 'No fue posible generar una respuesta.' });
+    return res.json({ reply: replyText });
   } catch (error: any) {
     console.error('Error in /api/ai/chat:', error);
     const errorMessage = error?.message || 'Error interno al comunicarse con el asistente de IA';
@@ -218,37 +237,23 @@ INSTRUCCIONES DE AUDITORÍA (ESTRICTAMENTE PEDAGÓGICAS):
 4. Redacta de forma clara, motivadora y constructiva en español.
 `;
 
-    // Try NVIDIA NIM first, with cascade fallback to Gemini 3.5-flash / Gemini-flash-latest
+    // Primary QA audit using Gemini cascade with robust fallback
     let auditResult = '';
+    const ai = getGeminiClient();
+
     try {
-      auditResult = await callNvidiaNim([
-        {
-          role: 'system',
-          content: 'Eres un auditor técnico y tutor de aseguramiento de la calidad (QA) para proyectos universitarios de software.',
-        },
-        { role: 'user', content: auditPrompt },
-      ]);
-    } catch (nvidiaErr: any) {
-      console.warn('NVIDIA NIM review not available, using Gemini QA auditor...');
-      const ai = getGeminiClient();
-      const auditModels = ['gemini-3.5-flash', 'gemini-flash-latest', 'gemini-3.8-flash'];
-      for (const m of auditModels) {
-        try {
-          const geminiRes = await ai.models.generateContent({
-            model: m,
-            contents: [{ role: 'user', parts: [{ text: auditPrompt }] }],
-            config: { temperature: 0.4 },
-          });
-          auditResult = geminiRes.text || '';
-          if (auditResult) break;
-        } catch (mErr: any) {
-          console.warn(`Audit model ${m} failed, trying next...`);
-        }
-      }
+      auditResult = await executeGeminiWithFallback(ai, {
+        contents: [{ role: 'user', parts: [{ text: auditPrompt }] }],
+        systemInstruction: 'Eres un auditor técnico y tutor de aseguramiento de la calidad (QA) para proyectos universitarios de software.',
+        temperature: 0.4,
+        timeoutPerAttemptMs: 8000,
+      });
+    } catch (auditErr: any) {
+      console.warn('Audit cascade through primary models failed:', auditErr?.message);
     }
 
     if (!auditResult) {
-      throw new Error('No fue posible generar la auditoría en este momento. Por favor reintenta en unos segundos.');
+      throw new Error('No fue posible generar la auditoría en este momento debido a alta demanda. Por favor reintenta en unos segundos.');
     }
 
     return res.json({ auditReport: auditResult });
@@ -286,16 +291,23 @@ Genera la respuesta con el siguiente formato estructurado:
 - **Recomendación para el estudiante**: Una breve nota pedagógica para asegurar la calidad de la entrega.
 `;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      config: {
+    let storyText = '';
+    try {
+      storyText = await executeGeminiWithFallback(ai, {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
         systemInstruction: ACADEMIC_JIRA_SYSTEM_PROMPT,
         temperature: 0.5,
-      },
-    });
+        timeoutPerAttemptMs: 8000,
+      });
+    } catch (err: any) {
+      console.warn('generate-story cascade failed:', err?.message);
+    }
 
-    return res.json({ storyText: response.text || '' });
+    if (!storyText) {
+      throw new Error('No fue posible generar la historia en este momento por alta demanda. Por favor reintenta.');
+    }
+
+    return res.json({ storyText });
   } catch (error: any) {
     console.error('Error in /api/ai/generate-story:', error);
     return res.status(500).json({ error: error?.message || 'Error al generar la historia de usuario' });

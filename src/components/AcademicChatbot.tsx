@@ -69,6 +69,7 @@ export const AcademicChatbot: React.FC = () => {
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [lastFailedPrompt, setLastFailedPrompt] = useState<string | null>(null);
 
   // Active sprint context
   const activeSprint = sprints.find(
@@ -131,36 +132,62 @@ Puedes hacerme cualquier pregunta o seleccionar una de las sugerencias rápidas 
           }
         : null;
 
-      const payloadMessages = updatedHistory.map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
+      // Filter out greeting and previous error notices so Gemini only receives clean conversational turns
+      const payloadMessages = updatedHistory
+        .filter((m) => m.id !== 'msg-welcome' && !m.id.endsWith('-err') && m.content.trim().length > 0)
+        .map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
 
-      const res = await fetch('/api/ai/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: payloadMessages,
-          projectContext,
-        }),
-      });
+      // Transparent 1-time auto-retry on transient failure
+      let responseData: any = null;
+      let lastErrMessage = '';
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || `Error en servidor: ${res.status}`);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const res = await fetch('/api/ai/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              messages: payloadMessages,
+              projectContext,
+            }),
+          });
+
+          if (res.ok) {
+            responseData = await res.json();
+            break;
+          } else {
+            const errData = await res.json().catch(() => ({}));
+            lastErrMessage = errData.error || `Error en servidor: ${res.status}`;
+          }
+        } catch (fetchErr: any) {
+          lastErrMessage = fetchErr?.message || 'Error de conexión de red';
+        }
+
+        if (attempt === 0) {
+          // Wait 1 second before silent second attempt
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
       }
 
-      const data = await res.json();
+      if (!responseData) {
+        throw new Error(lastErrMessage || 'No fue posible obtener una respuesta');
+      }
+
       const botMsg: ChatMessage = {
         id: `msg-${Date.now()}-bot`,
         role: 'assistant',
-        content: data.reply || 'No fue posible obtener una respuesta.',
+        content: responseData.reply || 'No fue posible obtener una respuesta.',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
 
       setMessages((prev) => [...prev, botMsg]);
+      setLastFailedPrompt(null);
     } catch (err: any) {
       console.error('Error in chat:', err);
+      setLastFailedPrompt(text);
       let userFriendlyNotice = 'Hubo una intermitencia momentánea en los servidores de IA.';
       const rawMsg = err.message || '';
       if (rawMsg.includes('503') || rawMsg.includes('high demand') || rawMsg.includes('UNAVAILABLE')) {
@@ -172,7 +199,7 @@ Puedes hacerme cualquier pregunta o seleccionar una de las sugerencias rápidas 
       const errorMsg: ChatMessage = {
         id: `msg-${Date.now()}-err`,
         role: 'assistant',
-        content: `⚠️ **Aviso del Asistente**: ${userFriendlyNotice} \n\nPuedes volver a enviar tu consulta o pulsar una de las sugerencias rápidas abajo.\n\n*Recuerda que una Historia de Usuario estándar sigue:* \n> "Como [rol], quiero [acción] para [beneficio]".`,
+        content: `⚠️ **Aviso del Asistente**: ${userFriendlyNotice} \n\nPuedes volver a enviar tu consulta pulsando el botón **Reintentar consulta** aquí abajo o seleccionando una de las sugerencias.\n\n*Recuerda que una Historia de Usuario estándar sigue:* \n> "Como [rol], quiero [acción] para [beneficio]".`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       setMessages((prev) => [...prev, errorMsg]);
@@ -311,6 +338,18 @@ Puedes hacerme cualquier pregunta o seleccionar una de las sugerencias rápidas 
                   <div className="whitespace-pre-wrap space-y-2 font-normal">
                     {msg.content}
                   </div>
+
+                  {msg.role === 'assistant' && (msg.id.endsWith('-err') || msg.content.includes('⚠️ **Aviso')) && lastFailedPrompt && (
+                    <div className="mt-2.5 pt-2 border-t border-amber-200/60 flex items-center">
+                      <button
+                        onClick={() => handleSendMessage(lastFailedPrompt)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium text-xs shadow-xs transition-all hover:scale-[1.02]"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Reintentar consulta</span>
+                      </button>
+                    </div>
+                  )}
 
                   <div className="flex items-center justify-between mt-2 pt-1 border-t border-black/5 text-[10px] opacity-70">
                     <span>{msg.timestamp}</span>

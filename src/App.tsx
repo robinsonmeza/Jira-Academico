@@ -4,6 +4,7 @@ import { Navbar } from './components/Navbar';
 import { LoginView } from './components/LoginView';
 import { ProjectsView } from './components/ProjectsView';
 import { BoardView } from './components/BoardView';
+import { AcademicChatbot } from './components/AcademicChatbot';
 import {
   HelpCircle,
   X,
@@ -43,15 +44,18 @@ const JiraAppContent: React.FC = () => {
       </main>
 
       {/* Footer Floating Guide Button */}
-      <div className="fixed bottom-4 right-4 z-30">
+      <div className="fixed bottom-5 left-5 z-30">
         <button
           onClick={() => setShowDocsModal(true)}
-          className="bg-slate-900 hover:bg-slate-800 text-white px-3.5 py-2 rounded-full text-xs font-semibold shadow-lg hover:shadow-xl border border-slate-700 flex items-center gap-2 transition-all group"
+          className="bg-slate-900/90 hover:bg-slate-900 text-white px-3.5 py-2 rounded-full text-xs font-semibold shadow-lg hover:shadow-xl border border-slate-700 flex items-center gap-2 transition-all group backdrop-blur-xs"
         >
           <HelpCircle className="w-4 h-4 text-indigo-400 group-hover:rotate-12 transition-transform" />
-          <span>Diagnóstico & Roles</span>
+          <span>Matriz de Roles & Guía</span>
         </button>
       </div>
+
+      {/* Academic Gemini Chatbot */}
+      <AcademicChatbot />
 
       {/* Deployment and Roles Guide Modal */}
       {showDocsModal && (

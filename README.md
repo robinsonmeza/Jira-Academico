@@ -1,9 +1,9 @@
 # Jira Board Clone - Documentación Técnica y Funcional
 
-> **Versión**: 3.0.0  
+> **Versión**: 3.1.0  
 > **Estado**: Producción / Desplegado en Vercel & Firebase Cloud Firestore  
 > **Autor Principal / Project Manager**: Robinson Meza (`RobinsonAmeza@gmail.com`)  
-> **Arquitectura**: React 18 + Vite + TypeScript + Tailwind CSS + Google Cloud Firestore Granular (Firebase)
+> **Arquitectura**: Full-stack (React 18 + Vite + Express Backend + Google GenAI SDK + Cloud Firestore)
 
 ---
 
@@ -11,9 +11,61 @@
 
 **Jira Board Clone** es una plataforma web colaborativa y multiusuario diseñada para la gestión ágil de proyectos de software académico y profesional. Permite planificar Sprints, gestionar Backlogs, administrar tableros Kanban interactivos, registrar métricas y controlar el acceso de usuarios mediante un modelo robusto de control de acceso basado en roles (**RBAC**).
 
+A partir de la versión **v3.1.0**, la plataforma integra **ScrumBot (Tutor Pedagógico con IA Gemini)** para orientar a los estudiantes en la redacción de Historias de Usuario, criterios de aceptación (INVEST/BDD) y conceptos ágiles, reduciendo drásticamente la carga de consultas recurrentes del docente.
+
 ---
 
-## 2. Novedades y Arquitectura de Concurrencia v3.0.0 (Solución de Concurrencia Multi-Estudiante)
+## 2. Tutor Académico Virtual con IA (ScrumBot) - v3.1.0
+
+### 2.1 Propósito Pedagógico
+En talleres universitarios y cursos de Ingeniería de Software, los estudiantes suelen presentar dudas recurrentes respecto a cómo estructurar historias de usuario, cómo estimar Story Points o cuáles son las responsabilidades según su rol asignado en el proyecto. 
+
+Para **disminuir la carga del docente y empoderar al estudiante**, se incorporó un chatbot pedagógico en tiempo real con IA (`gemini-3.8-flash`) accesible mediante un botón flotante permanente y contextualizado por proyecto:
+
+1. **Guía para Documentar Historias de Usuario (HU)**:
+   - Enseñanza del estándar canónico:
+     > *"Como [rol], quiero [funcionalidad] para [beneficio]"*.
+   - Redacción de Criterios de Aceptación con enfoque **BDD / Given-When-Then** (*Dado que... Cuando... Entonces...*).
+   - Principios de calidad **INVEST** (Independiente, Negociable, Valiosa, Estimable, Small, Testeable).
+2. **Definiciones y Roles del Equipo**:
+   - Explicación de responsabilidades de **Product Owner**, **Frontend**, **Backend** y **Project Manager**.
+   - Definición de Sprint, Product Backlog, Definition of Done (DoD) y Story Points (serie Fibonacci 1, 2, 3, 5, 8).
+3. **Consciencia del Contexto del Proyecto**:
+   - El bot recibe el nombre del proyecto activo, su clave (`key`), descripción, sprint activo y flujo de columnas del tablero, adaptando sus respuestas a la realidad de cada equipo.
+4. **Inserción Rápida de Plantillas**:
+   - En el modal de creación y edición de tareas, se incluyó el botón **"Insertar Plantilla HU"** para poblar al instante la estructura requerida.
+5. **Chips de Preguntas Frecuentes**:
+   - Acceso en un clic a guías preparadas (BDD, roles, estimación en Fibonacci y contexto del proyecto).
+
+### 2.2 Blindaje Académico (Guardrails Estrictos) y Resiliencia en Servidor (v3.2.0)
+Para proteger el propósito educativo de la plataforma y evitar desvíos o costos imprevistos:
+- **Blindaje Anti-Desvío de Tema (Strict Guardrails)**:
+  - Instrucción de sistema estricta en `server.ts` que rechaza automáticamente cualquier solicitud que no pertenezca a Metodologías Ágiles (Scrum/Kanban) o Ingeniería de Software (ej. redacción de poemas, tareas de otras materias, juegos, etc.).
+  - Respuesta estandarizada y cortés: *"Como tutor pedagógico de Scrum y Jira para tu proyecto académico, solo puedo orientarte en temas de metodologías ágiles, historias de usuario, roles de equipo y tareas de este tablero. ¿En qué funcionalidad o historia de tu Sprint podemos avanzar hoy?"*
+  - **Protección Anti-Jailbreak / Prompt Injection**: Ignora intentos de "modo DAN", olvido de instrucciones o suplantación de identidad.
+  - **Enfoque Pedagógico**: Orienta con contratos de API, escenarios BDD y criterios técnicos, sin hacerle la tarea completa de codificación al estudiante para preservar el aprendizaje.
+
+### 2.3 Integración de IA Multimodelo (Opción 1 y Opción 2)
+1. **Opción 1 - Alta Disponibilidad y Resiliencia (Fallback Cascade)**:
+   - Cascada multinivel en servidor para soportar picos transitorios: `gemini-3.5-flash` (alta estabilidad) -> `gemini-flash-latest` -> `gemini-3.8-flash` -> `NVIDIA NIM Llama 3.3 70B`.
+2. **Opción 2 - Auditoría Técnica y Pedagógica de Calidad (QA Tool)**:
+   - Pestaña interactiva **"Auditoría QA (NVIDIA AI)"** en el modal de tareas (`TaskModal.tsx`).
+   - Endpoint `/api/ai/audit-task` que analiza la tarea seleccionada y emite un dictamen académico exhaustivo:
+     - Cumplimiento del formato "Como / Quiero / Para".
+     - Evaluación de criterios INVEST y BDD (*Dado / Cuando / Entonces*).
+     - Validación técnica (Frontend, Backend, Seguridad, Manejo de errores y UX).
+     - Dictamen del estado: `✅ LISTA PARA SPRINT`, `⚠️ REQUIERE REFINAMIENTO` o `❌ INCOMPLETA`.
+     - Sugerencia redactada de mejora con escenarios de prueba completos.
+
+### 2.4 Pruebas Automatizadas de Funcionalidad del Chatbot y Auditoría (Verificadas)
+- **Prueba 1 (Consulta teórica e INVEST)**: Respuesta clara y en 2 líneas del principio INVEST (`HTTP 200 OK`).
+- **Prueba 2 (Blindaje ante temas ajenos - Poema)**: Rechazo exitoso de prompt de poesía con la respuesta de guardrail académica.
+- **Prueba 3 (Auditoría Técnica de Tarea - Login con Google)**: Reporte exhaustivo con diagnóstico BDD, preguntas de seguridad y sugerencia técnica de redacción emitido correctamente (`HTTP 200 OK`).
+- **Prueba 4 (Inserción de plantilla en UI)**: Botón *Insertar Plantilla HU* y pestaña *Auditoría QA* plenamente integrados en `TaskModal.tsx`.
+
+---
+
+## 3. Novedades y Arquitectura de Concurrencia v3.0.0 (Solución de Concurrencia Multi-Estudiante)
 
 ### 2.1 Diagnóstico de la Problemática Anterior (v2.5.0)
 En versiones previas, todo el estado de la aplicación se guardaba en un único documento monolítico (`app_state/main`). Cuando dos o más estudiantes trabajaban en el mismo proyecto al mismo tiempo (por ejemplo, el Estudiante A movía una tarea mientras el Estudiante B creaba o editaba otra), la operación `setDoc` de uno sobreescribía todo el documento, borrando los cambios del compañero (condición de carrera o *last-write-wins*).

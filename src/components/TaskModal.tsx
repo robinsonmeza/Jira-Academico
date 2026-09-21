@@ -23,6 +23,11 @@ import {
   Users,
   Check,
   Search,
+  Sparkles,
+  ShieldCheck,
+  Cpu,
+  RefreshCw,
+  FileCheck,
 } from 'lucide-react';
 
 interface TaskModalProps {
@@ -92,12 +97,54 @@ export const TaskModal: React.FC<TaskModalProps> = ({
   const [labelsInput, setLabelsInput] = useState('');
   const assigneeDropdownRef = useRef<HTMLDivElement>(null);
 
-  // Active Tab: 'details' | 'comments' | 'activity' | 'attachments'
-  const [activeTab, setActiveTab] = useState<'details' | 'comments' | 'activity' | 'attachments'>('details');
+  // Active Tab: 'details' | 'comments' | 'activity' | 'attachments' | 'audit'
+  const [activeTab, setActiveTab] = useState<'details' | 'comments' | 'activity' | 'attachments' | 'audit'>('details');
   const [newComment, setNewComment] = useState('');
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Option 2: AI Code & Story Quality Audit State (NVIDIA NIM / Gemini)
+  const [auditReport, setAuditReport] = useState<string | null>(null);
+  const [isAuditing, setIsAuditing] = useState(false);
+  const [auditError, setAuditError] = useState<string | null>(null);
+
+  const handleRunAudit = async () => {
+    setIsAuditing(true);
+    setAuditError(null);
+    try {
+      const res = await fetch('/api/ai/audit-task', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          task: {
+            title,
+            description,
+            task_type: taskType,
+            priority,
+            story_points: storyPoints,
+            status: existingTask?.status || 'Backlog',
+          },
+          projectContext: currentProject
+            ? { name: currentProject.name, key: currentProject.key }
+            : null,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `Error ${res.status}`);
+      }
+
+      const data = await res.json();
+      setAuditReport(data.auditReport || 'Auditoría completada sin observaciones.');
+    } catch (err: any) {
+      console.error('Error auditing task:', err);
+      setAuditError(err.message || 'No fue posible ejecutar la auditoría en este momento.');
+    } finally {
+      setIsAuditing(false);
+    }
+  };
 
   // Editable permission check
   const isEditable = !isEditing || (existingTask && canEdit(existingTask));
@@ -339,15 +386,20 @@ export const TaskModal: React.FC<TaskModalProps> = ({
 
             <button
               type="button"
-              onClick={() => setActiveTab('activity')}
+              onClick={() => {
+                setActiveTab('audit');
+                if (!auditReport && !isAuditing) {
+                  handleRunAudit();
+                }
+              }}
               className={`py-3 border-b-2 transition-colors flex items-center gap-1.5 ${
-                activeTab === 'activity'
+                activeTab === 'audit'
                   ? 'border-indigo-600 text-indigo-600 font-bold'
                   : 'border-transparent text-slate-500 hover:text-slate-800'
               }`}
             >
-              <History className="w-3.5 h-3.5" />
-              Historial ({taskActivity.length})
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Auditoría QA (NVIDIA AI)</span>
             </button>
           </div>
         )}
@@ -381,9 +433,25 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1">
-                    Descripción
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider">
+                      Descripción & Criterios de Aceptación
+                    </label>
+                    {isEditable && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const huTemplate = `h3. Historia de Usuario\n*Como* [rol / tipo de usuario]\n*Quiero* [funcionalidad o requerimiento]\n*Para* [beneficio o valor que aporta]\n\nh3. Criterios de Aceptación (INVEST / BDD)\n# *Dado que* [contexto inicial],\n  *Cuando* [el usuario ejecuta la acción],\n  *Entonces* [el sistema valida y responde con el resultado esperado].\n# *Dado que* [segundo escenario],\n  *Cuando* [sucede una condición errónea],\n  *Entonces* [se muestra mensaje descriptivo].\n\nh3. Notas Técnicas & DoD\n* Interfaz responsive y validada.\n* Revisión de código completada.`;
+                          setDescription((prev) => (prev ? prev + '\n\n' + huTemplate : huTemplate));
+                        }}
+                        className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 hover:underline"
+                        title="Insertar plantilla formal de Historia de Usuario"
+                      >
+                        <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
+                        <span>Insertar Plantilla HU</span>
+                      </button>
+                    )}
+                  </div>
                   <textarea
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
@@ -918,6 +986,74 @@ export const TaskModal: React.FC<TaskModalProps> = ({
                       </div>
                     );
                   })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Option 2: QA Audit Tab with NVIDIA NIM (Llama 3.3 70B) */}
+          {activeTab === 'audit' && (
+            <div className="space-y-4">
+              <div className="bg-gradient-to-r from-emerald-50 to-teal-50 border border-emerald-200 rounded-xl p-4 flex items-start justify-between gap-4">
+                <div className="flex items-start gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-sm font-bold text-emerald-950">Auditoría Técnica y Pedagógica de Calidad</h4>
+                      <span className="bg-emerald-200/80 text-emerald-900 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
+                        <Cpu className="w-3 h-3 text-emerald-700" />
+                        NVIDIA NIM (Llama 3.3 70B)
+                      </span>
+                    </div>
+                    <p className="text-xs text-emerald-800 mt-0.5 leading-relaxed">
+                      Evalúa si la historia cumple con la estructura canónica, criterios INVEST, escenarios BDD y consideraciones técnicas de desarrollo (Frontend/Backend) antes de pasar a producción.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleRunAudit}
+                  disabled={isAuditing}
+                  className="px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs shrink-0"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isAuditing ? 'animate-spin' : ''}`} />
+                  <span>{isAuditing ? 'Auditando...' : 'Re-auditar Tarea'}</span>
+                </button>
+              </div>
+
+              {auditError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-500 shrink-0" />
+                  <span>{auditError}</span>
+                </div>
+              )}
+
+              {isAuditing && !auditReport && (
+                <div className="p-12 text-center text-slate-500 space-y-3 bg-white border border-slate-200 rounded-xl shadow-2xs">
+                  <div className="inline-flex p-3 rounded-full bg-emerald-50 text-emerald-600 animate-pulse">
+                    <Sparkles className="w-6 h-6 animate-spin" />
+                  </div>
+                  <p className="text-xs font-medium text-slate-700">Analizando requerimientos técnicos y criterios de aceptación con NVIDIA Llama 3.3 70B...</p>
+                  <p className="text-[11px] text-slate-400">Verificando principio INVEST y completitud de entrega.</p>
+                </div>
+              )}
+
+              {auditReport && (
+                <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-2xs space-y-3">
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+                    <div className="flex items-center gap-2 text-xs font-bold text-slate-800">
+                      <FileCheck className="w-4 h-4 text-emerald-600" />
+                      <span>Informe de Evaluación Académica de la Tarea</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400">Generado con aceleración GPU NVIDIA</span>
+                  </div>
+
+                  <div className="text-xs leading-relaxed text-slate-700 whitespace-pre-wrap font-normal">
+                    {auditReport}
+                  </div>
                 </div>
               )}
             </div>
